@@ -31,9 +31,20 @@ else
     info ".env.firefly 已存在,保持不动"
 fi
 
-# --- 4. 构建并启动全部服务(api 启动时自动跑数据库迁移)---
-info "构建镜像并启动全部服务...(首次运行需下载镜像,耐心等几分钟)"
-docker compose up -d --build
+# --- 4. 用 stdin tar 上下文构建应用镜像 ---
+# 不用 docker compose build:buildkit 对非 ASCII 项目路径(如中文目录)会报
+# "x-docker-expose-session-sharedkey" gRPC 错误;tar 流式上下文完全绕开路径。
+info "构建应用镜像..."
+tar -cf - --exclude=.venv --exclude=.git --exclude=.pytest_cache --exclude=.ruff_cache \
+    pyproject.toml app alembic.ini alembic docker \
+    | docker build -f docker/Dockerfile -t firefly-copilot-api -
+docker tag firefly-copilot-api firefly-copilot-worker
+docker tag firefly-copilot-api firefly-copilot-beat
+ok "应用镜像构建完成(api/worker/beat 共用一个镜像)"
+
+# --- 5. 启动全部服务(api 启动时自动跑数据库迁移)---
+info "启动全部服务...(首次运行需下载 Firefly/Postgres/Redis 镜像)"
+docker compose up -d
 ok "全部服务已启动"
 docker compose ps
 

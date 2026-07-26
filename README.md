@@ -217,6 +217,21 @@ docker-compose.yml      # Firefly III + PG x2 + Redis + api/worker/beat
 
 排障自检:`python -m app.doctor`(容器内:`docker compose run --rm api python -m app.doctor`),逐项检查配置与依赖服务连通性;加 `--llm` 可做一次真实 LLM 分类实测。
 
+## 常见问题
+
+**构建报错 `x-docker-expose-session-sharedkey contains value with non-printable ASCII characters`**
+项目路径含非 ASCII 字符(如中文目录)触发的 buildkit bug。setup 脚本已内置规避(tar 流式上下文构建);如果手动构建,请照抄脚本里的 `tar ... | docker build -` 写法,或把项目放到纯英文路径。
+
+**装完 Docker Desktop 后反复弹「远程桌面 ActiveX 控件 rdclientax.dll」/「RemoteApp 无法连接」**
+是 WSLg(WSL 的 Linux 图形组件,内部走远程桌面协议)在本机加载失败后无限重试,与本项目无关。跑容器用不到 WSLg,直接关掉:在 `%USERPROFILE%\.wslconfig` 写入
+
+```ini
+[wsl2]
+guiApplications=false
+```
+
+然后 `wsl --shutdown` 并重启 Docker Desktop 即可。
+
 ## Roadmap
 
 ### P1(已实现)

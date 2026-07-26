@@ -1,3 +1,6 @@
+# 固定项目名:让容器/卷命名与所在目录无关(中文路径构建需从英文 junction 目录执行)
+name: firefly-copilot
+
 services:
   firefly:
     image: fireflyiii/core:latest

@@ -36,9 +36,24 @@ if (-not (Test-Path ".env.firefly")) {
     Info ".env.firefly already exists, keeping it"
 }
 
-# --- 4. Build + start everything (api runs DB migration automatically) ---
-Info "Building images and starting all services... (first run downloads images, can take a few minutes)"
-docker compose up -d --build
+# --- 4. Build the app image via stdin tar context ---
+# Why not `docker compose build`: buildkit chokes on non-ASCII project paths
+# (e.g. Chinese directory names) with a "x-docker-expose-session-sharedkey" gRPC
+# error. Feeding the context as a tar stream avoids the path entirely.
+Info "Building application image..."
+$ctxTar = Join-Path $env:TEMP "ffcopilot-ctx.tar"
+tar -cf $ctxTar --exclude=.venv --exclude=.git --exclude=.pytest_cache --exclude=.ruff_cache pyproject.toml app alembic.ini alembic docker
+if ($LASTEXITCODE -ne 0) { Fail "tar failed (Windows 10+ ships tar.exe by default)" }
+cmd /c "docker build -f docker/Dockerfile -t firefly-copilot-api - < `"$ctxTar`""
+if ($LASTEXITCODE -ne 0) { Fail "docker build failed, see output above" }
+Remove-Item $ctxTar -ErrorAction SilentlyContinue
+docker tag firefly-copilot-api firefly-copilot-worker
+docker tag firefly-copilot-api firefly-copilot-beat
+Ok "Application image built (api/worker/beat share one image)"
+
+# --- 5. Start everything (api runs DB migration automatically) ---
+Info "Starting all services... (first run downloads Firefly/Postgres/Redis images)"
+docker compose up -d
 if ($LASTEXITCODE -ne 0) { Fail "docker compose up failed, see output above" }
 Ok "All services started"
 docker compose ps
