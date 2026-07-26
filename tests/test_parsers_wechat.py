@@ -1,9 +1,11 @@
-"""微信账单 CSV 解析器测试:编码探测、方向映射、金额清洗、中性行/坏行跳过、整体乱码。"""
+"""微信账单解析器测试:编码探测、方向映射、金额清洗、中性行/坏行跳过、整体乱码、xlsx 分支。"""
 
+import io
 from datetime import datetime
 from decimal import Decimal
 
 import pytest
+from openpyxl import Workbook
 
 from app.parsers.base import ParseError
 from app.parsers.wechat import parse_wechat_csv
@@ -126,3 +128,88 @@ def test_decodable_but_no_header_raises_parse_error():
     """能解码但找不到微信表头的内容同样视为不可解析。"""
     with pytest.raises(ParseError):
         parse_wechat_csv("这只是一段普通文本\n没有账单表头\n".encode())
+
+
+# ---------- xlsx 分支 ----------
+
+_XLSX_HEADER = [
+    "交易时间", "交易类型", "交易对方", "商品", "收/支", "金额(元)",
+    "支付方式", "当前状态", "交易单号", "商户单号", "备注",
+]
+
+
+def _xlsx_bytes(rows: list[list]) -> bytes:
+    """内存构造 xlsx 工作簿并导出 bytes。"""
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parse_xlsx_bill():
+    """xlsx 分支:preamble 行、datetime 单元格、¥ 前缀金额、中性行跳过。"""
+    rows = [
+        ["微信支付账单明细"],
+        ["微信昵称:[老王]"],
+        ["----------------------微信支付账单明细列表--------------------"],
+        _XLSX_HEADER,
+        # 交易时间为 datetime 单元格
+        [datetime(2026, 6, 5, 12, 30, 11), "商户消费", "肯德基(北京店)", "汉堡套餐", "支出",
+         "¥23.50", "零钱", "支付成功", "4200001234202606051234567890", "1000010001", "/"],
+        # 交易时间为字符串单元格
+        ["2026-06-08 09:00:00", "转账", "张三", "/", "收入",
+         "¥100.00", "/", "已存入零钱", "1000039901202606080987654321", "/", "备注A"],
+        # 中性 "/" 行(零钱提现),应跳过
+        [datetime(2026, 6, 10, 20, 15, 0), "零钱提现", "工商银行", "/", "/",
+         "¥50.00", "零钱", "提现已到账", "1000050001202606100000000001", "/", "/"],
+    ]
+    txns, skipped = parse_wechat_csv(_xlsx_bytes(rows))
+    assert len(txns) == 2
+    assert skipped == 1
+
+    expense = txns[0]
+    assert expense.source is TxnSource.WECHAT
+    assert expense.direction is TxnDirection.EXPENSE
+    assert expense.occurred_at == datetime(2026, 6, 5, 12, 30, 11)
+    assert expense.amount == Decimal("23.50")
+    assert expense.counterparty == "肯德基(北京店)"
+    assert expense.description == "汉堡套餐"
+    assert expense.category_hint == "商户消费"
+    assert expense.account_hint == "零钱"
+    assert expense.source_ref == "4200001234202606051234567890"
+
+    income = txns[1]
+    assert income.direction is TxnDirection.INCOME
+    assert income.occurred_at == datetime(2026, 6, 8, 9, 0, 0)
+    assert income.amount == Decimal("100.00")
+
+
+def test_empty_xlsx_raises_parse_error():
+    """空工作簿(无任何行)找不到表头:抛 ParseError。"""
+    with pytest.raises(ParseError):
+        parse_wechat_csv(_xlsx_bytes([]))
+
+
+def test_corrupt_xlsx_raises_parse_error():
+    """zip 魔数正确但内容损坏:openpyxl 异常包装为 ParseError。"""
+    with pytest.raises(ParseError, match="无法解析微信 xlsx 账单"):
+        parse_wechat_csv(b"PK\x03\x04garbage-not-a-real-xlsx")
+
+
+def test_xlsx_and_csv_produce_identical_results():
+    """同一批数据分别走 csv 与 xlsx 分支,字段映射结果完全一致。"""
+    data_rows = [
+        ["2026-06-05 12:30:11", "商户消费", "肯德基(北京店)", "汉堡套餐", "支出",
+         "¥23.50", "零钱", "支付成功", "4200001234202606051234567890", "1000010001", "/"],
+        ["2026-06-08 09:00:00", "转账", "张三", "/", "收入",
+         "¥100.00", "/", "已存入零钱", "1000039901202606080987654321", "/", "备注A"],
+        ["2026-06-10 20:15:00", "零钱提现", "工商银行", "/", "/",
+         "¥50.00", "零钱", "提现已到账", "1000050001202606100000000001", "/", "/"],
+    ]
+    csv_txns, csv_skipped = parse_wechat_csv(_BILL_TEXT.encode("utf-8"))
+    xlsx_txns, xlsx_skipped = parse_wechat_csv(_xlsx_bytes([_XLSX_HEADER, *data_rows]))
+    assert csv_skipped == xlsx_skipped == 1
+    assert csv_txns == xlsx_txns

@@ -1,6 +1,7 @@
-"""微信支付账单 CSV 解析器。
+"""微信支付账单解析器:同时支持 CSV 与 XLSX(新版「用于个人对账」导出)。
 
 导出路径:微信 -> 我 -> 服务 -> 钱包 -> 账单 -> 常见问题 -> 下载账单。
+格式识别:字节流以 PK\x03\x04(zip 魔数)开头视为 xlsx,否则按文本 csv 处理。
 典型表头列:交易时间, 交易类型, 交易对方, 商品, 收/支, 金额(元), 支付方式,
 当前状态, 交易单号, 商户单号, 备注
 映射:
@@ -13,7 +14,9 @@
 import csv
 import io
 from datetime import datetime
+from typing import Any
 
+import openpyxl
 from pydantic import ValidationError
 
 from app.logger import get_logger
@@ -21,6 +24,9 @@ from app.parsers.base import ParseError, ParseResult
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 
 logger = get_logger(__name__)
+
+# xlsx(zip)文件魔数
+_XLSX_MAGIC = b"PK\x03\x04"
 
 # 依次尝试的编码:UTF-8(兼容 BOM)优先,失败再按国标 GB18030(GBK 超集)
 _ENCODINGS = ("utf-8-sig", "gb18030")
@@ -44,8 +50,9 @@ def _decode(raw: bytes) -> str:
     raise ParseError("无法识别账单编码(已尝试 utf-8-sig / gb18030)")
 
 
-def _locate_header(lines: list[str]) -> int:
-    for idx, line in enumerate(lines):
+def _locate_header(rows: list[list[str]]) -> int:
+    for idx, row in enumerate(rows):
+        line = ",".join(row)
         if all(marker in line for marker in _HEADER_MARKERS):
             return idx
     raise ParseError("未找到微信账单表头行")
@@ -66,13 +73,39 @@ def _parse_time(value: str) -> datetime:
         return datetime.fromisoformat(value)
 
 
-def parse_wechat_csv(raw: bytes) -> ParseResult:
-    text = _decode(raw)
-    lines = text.splitlines()
-    start = _locate_header(lines)
+def _cell_to_str(value: Any) -> str:
+    """xlsx 单元格值统一转 str:None->空串,datetime->标准格式,数字->str。"""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
 
-    reader = csv.reader(io.StringIO("\n".join(lines[start:])))
-    header = [cell.strip() for cell in next(reader)]
+
+def _rows_from_csv(raw: bytes) -> list[list[str]]:
+    text = _decode(raw)
+    return list(csv.reader(io.StringIO(text)))
+
+
+def _rows_from_xlsx(raw: bytes) -> list[list[str]]:
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        try:
+            sheet = workbook.worksheets[0]
+            return [
+                [_cell_to_str(value) for value in row]
+                for row in sheet.iter_rows(values_only=True)
+            ]
+        finally:
+            workbook.close()
+    except Exception as exc:
+        raise ParseError(f"无法解析微信 xlsx 账单:{exc}") from exc
+
+
+def _convert_rows(rows: list[list[str]]) -> ParseResult:
+    """csv/xlsx 共享逻辑:定位表头 -> 列映射 -> 逐行转 CanonicalTransaction。"""
+    start = _locate_header(rows)
+    header = [cell.strip() for cell in rows[start]]
 
     cols = {
         "time": _find_col(header, "交易时间"),
@@ -96,7 +129,7 @@ def parse_wechat_csv(raw: bytes) -> ParseResult:
     results: list[CanonicalTransaction] = []
     skipped = 0
 
-    for row in reader:
+    for row in rows[start + 1 :]:
         # 纯空行(尾部空行等)不计入 skipped
         if not any(c.strip() for c in row):
             continue
@@ -128,3 +161,12 @@ def parse_wechat_csv(raw: bytes) -> ParseResult:
         results.append(txn)
 
     return results, skipped
+
+
+def parse_wechat_csv(raw: bytes) -> ParseResult:
+    """解析微信账单字节流,自动识别 csv 或 xlsx 格式(zip 魔数判定)。"""
+    if raw[:4] == _XLSX_MAGIC:
+        rows = _rows_from_xlsx(raw)
+    else:
+        rows = _rows_from_csv(raw)
+    return _convert_rows(rows)

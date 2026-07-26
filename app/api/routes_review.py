@@ -1,8 +1,8 @@
 """内置 Web 控制台:服务端渲染 HTML,人工复核与快捷记账入口。
 
-GET  /review                  控制台页面(提示条 + 快捷记账 + CSV 上传 + 待复核卡片)
+GET  /review                  控制台页面(提示条 + 快捷记账 + CSV/XLSX 上传 + 待复核卡片)
 POST /review/quick            快捷记账(parse_quick_expense 文本解析)
-POST /review/upload           CSV 上传(复用 routes_upload.enqueue_csv)
+POST /review/upload           CSV/XLSX 上传(复用 routes_upload.enqueue_csv)
 POST /review/{id}/approve     批准 -> finalize_review.delay
 POST /review/{id}/correct     改分类(回流规则库)-> finalize_review.delay
 POST /review/{id}/reject      驳回(仅状态流转)
@@ -170,13 +170,13 @@ def _render_page(msg: str, items: list[ReviewItem]) -> str:
   </form>
 </section>
 <section class="panel">
-  <h2>上传账单 CSV</h2>
+  <h2>上传账单 CSV / XLSX</h2>
   <form method="post" action="/review/upload" enctype="multipart/form-data" class="row">
     <select name="source">
       <option value="alipay">支付宝</option>
       <option value="wechat">微信</option>
     </select>
-    <input type="file" name="file" accept=".csv" required>
+    <input type="file" name="file" accept=".csv,.xlsx" required>
     <button type="submit">上传</button>
   </form>
 </section>
