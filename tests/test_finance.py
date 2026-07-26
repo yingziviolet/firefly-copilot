@@ -29,6 +29,22 @@ def test_finance_query_rejects_invalid_date_ranges():
         FinanceQuery(start=date(2025, 1, 1), end=date(2026, 7, 1))
 
 
+def test_finance_query_accepts_common_llm_field_aliases():
+    query = FinanceQuery.model_validate(
+        {
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-30",
+            "type": "expense",
+            "merchant": "美团",
+            "metric": "sum",
+        }
+    )
+
+    assert query.start == date(2026, 6, 1)
+    assert query.end == date(2026, 6, 30)
+    assert query.transaction_type == "withdrawal"
+
+
 def test_format_money_always_uses_two_decimal_places():
     assert format_money(Decimal("150.000000000000")) == "150.00"
     assert format_money(Decimal("335.050000000000")) == "335.05"
