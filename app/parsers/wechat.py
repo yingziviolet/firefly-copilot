@@ -11,25 +11,21 @@
 - category_hint=交易类型, account_hint=支付方式, counterparty=交易对方
 """
 
-import csv
-import io
 from datetime import datetime
-from typing import Any
 
-import openpyxl
 from pydantic import ValidationError
 
 from app.logger import get_logger
-from app.parsers.base import ParseError, ParseResult
+from app.parsers.base import (
+    ParseError,
+    ParseResult,
+    decode_text_rows,
+    is_xlsx,
+    rows_from_xlsx,
+)
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 
 logger = get_logger(__name__)
-
-# xlsx(zip)文件魔数
-_XLSX_MAGIC = b"PK\x03\x04"
-
-# 依次尝试的编码:UTF-8(兼容 BOM)优先,失败再按国标 GB18030(GBK 超集)
-_ENCODINGS = ("utf-8-sig", "gb18030")
 
 # 收/支 -> 方向;"/" 等中性取值不在映射内,按跳过处理
 _DIRECTION_MAP = {
@@ -39,15 +35,6 @@ _DIRECTION_MAP = {
 
 # 表头行特征列:同时出现才认定为真正表头(preamble 说明行不会同时含这两个)
 _HEADER_MARKERS = ("交易时间", "收/支")
-
-
-def _decode(raw: bytes) -> str:
-    for encoding in _ENCODINGS:
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise ParseError("无法识别账单编码(已尝试 utf-8-sig / gb18030)")
 
 
 def _locate_header(rows: list[list[str]]) -> int:
@@ -71,35 +58,6 @@ def _parse_time(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return datetime.fromisoformat(value)
-
-
-def _cell_to_str(value: Any) -> str:
-    """xlsx 单元格值统一转 str:None->空串,datetime->标准格式,数字->str。"""
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
-
-
-def _rows_from_csv(raw: bytes) -> list[list[str]]:
-    text = _decode(raw)
-    return list(csv.reader(io.StringIO(text)))
-
-
-def _rows_from_xlsx(raw: bytes) -> list[list[str]]:
-    try:
-        workbook = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        try:
-            sheet = workbook.worksheets[0]
-            return [
-                [_cell_to_str(value) for value in row]
-                for row in sheet.iter_rows(values_only=True)
-            ]
-        finally:
-            workbook.close()
-    except Exception as exc:
-        raise ParseError(f"无法解析微信 xlsx 账单:{exc}") from exc
 
 
 def _convert_rows(rows: list[list[str]]) -> ParseResult:
@@ -165,8 +123,8 @@ def _convert_rows(rows: list[list[str]]) -> ParseResult:
 
 def parse_wechat_csv(raw: bytes) -> ParseResult:
     """解析微信账单字节流,自动识别 csv 或 xlsx 格式(zip 魔数判定)。"""
-    if raw[:4] == _XLSX_MAGIC:
-        rows = _rows_from_xlsx(raw)
+    if is_xlsx(raw):
+        rows = rows_from_xlsx(raw, label="微信")
     else:
-        rows = _rows_from_csv(raw)
+        rows = decode_text_rows(raw, decode_error="无法识别账单编码(已尝试 utf-8-sig / gb18030)")
     return _convert_rows(rows)

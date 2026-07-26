@@ -5,7 +5,10 @@ POST /review/quick            快捷记账(parse_quick_expense 文本解析)
 POST /review/upload           CSV/XLSX 上传(复用 routes_upload.enqueue_csv)
 POST /review/{id}/approve     批准 -> finalize_review.delay
 POST /review/{id}/correct     改分类(回流规则库)-> finalize_review.delay
+                              -> reclassify_pending.delay(rules_only=True) 联动清同商户
 POST /review/{id}/reject      驳回(仅状态流转)
+POST /review/approve-all      全部批准 -> 逐条 approve + finalize_review.delay
+POST /review/reclassify       触发 reclassify_pending.delay(rules_only=False)
 
 鉴权:settings.console_token 非空时启用;带 ?token=<正确值> 种 httponly cookie 并
 303 回 /review,此后凭 cookie 通过;两者都没有/不对返回 401 提示页;token 为空不设防。
@@ -14,7 +17,8 @@ POST /review/{id}/reject      驳回(仅状态流转)
 
 import html
 import secrets
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, Request, UploadFile
@@ -30,7 +34,7 @@ from app.parsers.base import ParseError
 from app.parsers.quick_text import parse_quick_expense
 from app.schemas.classify import DEFAULT_CATEGORIES
 from app.services import review
-from app.worker.tasks_ingest import finalize_review, ingest_transaction
+from app.worker.tasks_ingest import finalize_review, ingest_transaction, reclassify_pending
 
 logger = get_logger(__name__)
 
@@ -116,6 +120,14 @@ button.ok{background:#16a34a}button.danger{background:#dc2626}
 """
 
 
+def _format_txn_time(occurred_at: Any, fallback: datetime | None) -> str:
+    """展示交易发生时间(ISO 字符串);解析失败回退复核项创建时间。"""
+    try:
+        return datetime.fromisoformat(str(occurred_at)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return fallback.strftime("%Y-%m-%d %H:%M") if fallback else "-"
+
+
 def _render_card(item: ReviewItem) -> str:
     payload = item.txn_payload or {}
     merchant = html.escape(str(payload.get("counterparty", "?")))
@@ -123,7 +135,7 @@ def _render_card(item: ReviewItem) -> str:
     currency = html.escape(str(payload.get("currency", "")))
     category = html.escape(item.suggested_category or "?")
     confidence = f"{item.confidence:.2f}" if item.confidence is not None else "-"
-    created = item.created_at.strftime("%Y-%m-%d %H:%M") if item.created_at else "-"
+    occurred = _format_txn_time(payload.get("occurred_at"), item.created_at)
     options = "".join(
         f'<option value="{html.escape(cat, quote=True)}">{html.escape(cat)}</option>'
         for cat in DEFAULT_CATEGORIES
@@ -132,7 +144,7 @@ def _render_card(item: ReviewItem) -> str:
 <article class="card">
   <div class="meta"><strong>{merchant}</strong>
     <span class="amount">{amount} {currency}</span></div>
-  <div class="sub">建议分类:{category}(置信度 {confidence})· {created}</div>
+  <div class="sub">建议分类:{category}(置信度 {confidence})· {occurred}</div>
   <div class="actions">
     <form method="post" action="/review/{item.id}/approve">
       <button type="submit" class="ok">批准</button></form>
@@ -173,6 +185,7 @@ def _render_page(msg: str, items: list[ReviewItem]) -> str:
   <h2>上传账单 CSV / XLSX</h2>
   <form method="post" action="/review/upload" enctype="multipart/form-data" class="row">
     <select name="source">
+      <option value="auto" selected>自动识别</option>
       <option value="alipay">支付宝</option>
       <option value="wechat">微信</option>
     </select>
@@ -181,7 +194,16 @@ def _render_page(msg: str, items: list[ReviewItem]) -> str:
   </form>
 </section>
 <section>
-  <h2>待复核({len(items)})</h2>
+  <div class="meta">
+    <h2>待复核({len(items)})</h2>
+    <div class="actions">
+      <form method="post" action="/review/reclassify">
+        <button type="submit">🔄 重新分类</button></form>
+      <form method="post" action="/review/approve-all">
+        <button type="submit" class="ok"
+          onclick="return confirm('确认批准全部待复核项?')">✅ 全部批准</button></form>
+    </div>
+  </div>
   {cards}
 </section>
 </body>
@@ -216,16 +238,45 @@ def console_quick(text: Annotated[str, Form()] = "") -> RedirectResponse:
     return _redirect_with_msg(f"已收到:{txn.counterparty} {txn.amount} {txn.currency},正在入账处理")
 
 
+# 渠道 -> 中文名,用于上传成功提示
+_SOURCE_NAMES = {"alipay": "支付宝", "wechat": "微信"}
+
+
 @router.post("/review/upload")
 async def console_upload(source: Annotated[str, Form()], file: UploadFile) -> RedirectResponse:
     raw = await file.read()
     try:
-        trace_id, enqueued, skipped = enqueue_csv(source, raw)
+        trace_id, enqueued, skipped, resolved = enqueue_csv(source, raw)
     except ParseError as exc:  # ParseError 是 ValueError 子类,必须先捕获
         return _redirect_with_msg(f"账单解析失败:{exc}")
     except ValueError:
         return _redirect_with_msg(f"不支持的账单来源:{source}")
-    return _redirect_with_msg(f"已入队 {enqueued} 笔,跳过 {skipped} 笔(trace {trace_id})")
+    name = _SOURCE_NAMES.get(resolved, resolved)
+    return _redirect_with_msg(
+        f"已入队 {enqueued} 笔,跳过 {skipped} 笔(渠道:{name},trace {trace_id})"
+    )
+
+
+@router.post("/review/approve-all")
+def console_approve_all(session: SessionDep) -> RedirectResponse:
+    items = review.list_pending(session, limit=1000)
+    approved: list[int] = []
+    for item in items:
+        try:
+            review.approve(session, item.id)
+            approved.append(item.id)
+        except ValueError as exc:  # 单条异常跳过,不影响整批
+            logger.warning("approve_all_skip", item_id=item.id, error=str(exc))
+    session.commit()
+    for item_id in approved:
+        finalize_review.delay(item_id)
+    return _redirect_with_msg(f"已批准 {len(approved)} 笔,正在写入 Firefly")
+
+
+@router.post("/review/reclassify")
+def console_reclassify() -> RedirectResponse:
+    reclassify_pending.delay(rules_only=False)
+    return _redirect_with_msg("已触发重新分类,任务在后台执行,稍后刷新查看结果")
 
 
 @router.post("/review/{item_id}/approve")
@@ -252,6 +303,8 @@ def console_correct(
         session.rollback()
         return _redirect_with_msg(str(exc))
     finalize_review.delay(item_id)
+    # 改正已回流规则库:借规则自动清掉同商户其余 pending(零 LLM 成本)
+    reclassify_pending.delay(rules_only=True)
     return _redirect_with_msg(f"已改分类 #{item_id} -> {category},正在写入 Firefly")
 
 

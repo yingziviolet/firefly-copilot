@@ -17,7 +17,7 @@ from app.models.rule import Rule, RuleMatchType
 from app.schemas.classify import ClassificationResult
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 from app.services import review
-from app.worker.tasks_ingest import finalize_review, ingest_transaction
+from app.worker.tasks_ingest import finalize_review, ingest_transaction, reclassify_pending
 
 # 与 test_api_routes 同构的小账单:2 笔有效 + 2 笔跳过
 ALIPAY_CSV = (
@@ -43,6 +43,13 @@ def finalize_delay(monkeypatch):
 def ingest_delay(monkeypatch):
     mock = MagicMock(name="ingest_transaction.delay")
     monkeypatch.setattr(ingest_transaction, "delay", mock)
+    return mock
+
+
+@pytest.fixture()
+def reclassify_delay(monkeypatch):
+    mock = MagicMock(name="reclassify_pending.delay")
+    monkeypatch.setattr(reclassify_pending, "delay", mock)
     return mock
 
 
@@ -101,6 +108,36 @@ def test_console_page_escapes_merchant(client, db_session):
     assert "&lt;script&gt;" in resp.text
 
 
+def test_console_card_shows_transaction_time(client, db_session):
+    """卡片展示交易发生时间(occurred_at),而非上传入库时间。"""
+    item = make_item(db_session)  # occurred_at=2026-07-25 12:30
+    resp = client.get("/review")
+    assert "2026-07-25 12:30" in resp.text
+    # 上传时刻(created_at)不再展示
+    db_session.refresh(item)
+    assert item.created_at.strftime("%Y-%m-%d %H:%M") not in resp.text
+
+
+def test_console_card_time_falls_back_to_created_at(client, db_session):
+    """occurred_at 解析失败时回退 created_at。"""
+    item = make_item(db_session)
+    item.txn_payload = {**item.txn_payload, "occurred_at": "not-a-date"}
+    db_session.flush()
+    db_session.refresh(item)
+    resp = client.get("/review")
+    assert item.created_at.strftime("%Y-%m-%d %H:%M") in resp.text
+
+
+def test_console_page_has_batch_buttons(client):
+    resp = client.get("/review")
+    assert 'action="/review/reclassify"' in resp.text
+    assert 'action="/review/approve-all"' in resp.text
+    assert "重新分类" in resp.text
+    assert "全部批准" in resp.text
+    # 全部批准需二次确认
+    assert "confirm(" in resp.text
+
+
 # ---------- 复核操作 ----------
 
 
@@ -115,7 +152,7 @@ def test_approve_flow(client, db_session, finalize_delay):
     finalize_delay.assert_called_once_with(item.id)
 
 
-def test_correct_flow(client, db_session, finalize_delay):
+def test_correct_flow(client, db_session, finalize_delay, reclassify_delay):
     item = make_item(db_session, counterparty="StarBucks")
     resp = client.post(
         f"/review/{item.id}/correct", data={"category": "购物"}, follow_redirects=False
@@ -133,6 +170,18 @@ def test_correct_flow(client, db_session, finalize_delay):
     assert rules[0].merchant_pattern == "starbucks"
     assert rules[0].category == "购物"
     finalize_delay.assert_called_once_with(item.id)
+    # 改正联动:触发规则模式重分类,清掉同商户其余 pending
+    reclassify_delay.assert_called_once_with(rules_only=True)
+
+
+def test_correct_failure_does_not_trigger_reclassify(
+    client, db_session, finalize_delay, reclassify_delay
+):
+    resp = client.post("/review/9999/correct", data={"category": "购物"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "不存在" in unquote_plus(resp.headers["location"])
+    finalize_delay.assert_not_called()
+    reclassify_delay.assert_not_called()
 
 
 def test_reject_flow(client, db_session, finalize_delay):
@@ -166,6 +215,37 @@ def test_operation_on_missing_item_redirects(client, finalize_delay):
     assert resp.status_code == 303
     assert "不存在" in unquote_plus(resp.headers["location"])
     finalize_delay.assert_not_called()
+
+
+# ---------- 批量操作 ----------
+
+
+def test_approve_all_flow(client, db_session, finalize_delay):
+    a = make_item(db_session, counterparty="A店")
+    b = make_item(db_session, counterparty="B店")
+    resp = client.post("/review/approve-all", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "已批准 2 笔" in unquote_plus(resp.headers["location"])
+
+    assert db_session.get(ReviewItem, a.id).status == ReviewStatus.APPROVED
+    assert db_session.get(ReviewItem, b.id).status == ReviewStatus.APPROVED
+    # 每条各触发一次 finalize
+    assert finalize_delay.call_count == 2
+    assert {call.args[0] for call in finalize_delay.call_args_list} == {a.id, b.id}
+
+
+def test_approve_all_empty(client, finalize_delay):
+    resp = client.post("/review/approve-all", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "已批准 0 笔" in unquote_plus(resp.headers["location"])
+    finalize_delay.assert_not_called()
+
+
+def test_reclassify_endpoint_triggers_task(client, reclassify_delay):
+    resp = client.post("/review/reclassify", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "已触发" in unquote_plus(resp.headers["location"])
+    reclassify_delay.assert_called_once_with(rules_only=False)
 
 
 # ---------- 快捷记账 ----------
@@ -209,6 +289,43 @@ def test_upload_form_enqueues(client, ingest_delay):
     first = ingest_delay.call_args_list[0].args[0]
     assert first["source"] == "alipay"
     assert first["counterparty"] == "某某餐厅"
+
+
+def test_upload_form_auto_option_default(client):
+    """渠道下拉第一项为「自动识别」且默认选中。"""
+    resp = client.get("/review")
+    assert '<option value="auto" selected>自动识别</option>' in resp.text
+    assert resp.text.index('value="auto"') < resp.text.index('value="alipay"')
+
+
+def test_upload_form_auto_detects_and_reports_source(client, ingest_delay):
+    """source=auto:自动识别渠道,成功提示带中文渠道名。"""
+    resp = client.post(
+        "/review/upload",
+        data={"source": "auto"},
+        files={"file": ("bill.csv", ALIPAY_CSV, "text/csv")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    msg = unquote_plus(resp.headers["location"])
+    assert "已入队 2 笔" in msg
+    assert "渠道:支付宝" in msg
+    assert ingest_delay.call_count == 2
+    assert ingest_delay.call_args_list[0].args[0]["source"] == "alipay"
+
+
+def test_upload_form_auto_unrecognized_redirects(client, ingest_delay):
+    resp = client.post(
+        "/review/upload",
+        data={"source": "auto"},
+        files={"file": ("bill.csv", b"hello,world\n1,2\n", "text/csv")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    msg = unquote_plus(resp.headers["location"])
+    assert "账单解析失败" in msg
+    assert "无法自动识别账单渠道" in msg
+    ingest_delay.assert_not_called()
 
 
 def test_upload_form_invalid_source_redirects(client, ingest_delay):

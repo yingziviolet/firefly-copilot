@@ -261,6 +261,107 @@ def test_finalize_review_rejected_skipped(
     assert fake_firefly.calls == []
 
 
+def _seed_pending(db_session, celery_eager, counterparty: str, source_ref: str) -> int:
+    """经低置信度 LLM 入一条 pending 复核项,返回 item_id。"""
+    result = tasks_ingest.ingest_transaction.delay(
+        _txn_data(counterparty=counterparty, source_ref=source_ref), TRACE_ID
+    ).get()
+    assert result["result"] == "pending_review"
+    return result["item_id"]
+
+
+def test_reclassify_pending_llm_mode(
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls, monkeypatch
+):
+    """rules_only=False:LLM 高置信度项自动批准入库,低置信度只刷新建议。"""
+    high_id = _seed_pending(db_session, celery_eager, "高分店", "rc-01")
+    low_id = _seed_pending(db_session, celery_eager, "低分店", "rc-02")
+    assert fake_firefly.calls == []
+
+    class VarLLM:
+        def classify_transaction(self, txn, categories) -> LLMClassification:
+            if txn.counterparty == "高分店":
+                return LLMClassification(category="购物", confidence=0.95, rationale="高")
+            return LLMClassification(category="娱乐", confidence=0.4, rationale="低")
+
+    monkeypatch.setattr("app.services.classifier.get_llm_client", lambda: VarLLM())
+
+    result = tasks_ingest.reclassify_pending.delay(rules_only=False).get()
+    assert result == {"resolved": 1, "remaining": 1}
+
+    high = db_session.get(ReviewItem, high_id)
+    assert high.status == ReviewStatus.APPROVED
+    assert high.suggested_category == "购物"
+    assert high.confidence == 0.95
+    # 达标项按 finalize 逻辑写入 Firefly 并落 IMPORTED
+    assert len(fake_firefly.calls) == 1
+    assert fake_firefly.calls[0]["category"] == "购物"
+    record = db_session.execute(
+        select(IngestedTransaction).where(IngestedTransaction.fingerprint == high.fingerprint)
+    ).scalar_one()
+    assert record.status == IngestStatus.IMPORTED
+
+    # 不达标项保持 pending,但建议已刷新
+    low = db_session.get(ReviewItem, low_id)
+    assert low.status == ReviewStatus.PENDING
+    assert low.suggested_category == "娱乐"
+    assert low.confidence == 0.4
+
+
+def test_reclassify_pending_rules_only(
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls, monkeypatch
+):
+    """rules_only=True:仅规则命中项流转,未命中跳过且不触达 LLM。"""
+    hit_id = _seed_pending(db_session, celery_eager, "规则店", "rc-03")
+    miss_id = _seed_pending(db_session, celery_eager, "无规则店", "rc-04")
+    _seed_rule(db_session, merchant="规则店", category="日用")
+
+    llm_calls: list[int] = []
+
+    def _tracking_llm():
+        llm_calls.append(1)
+        raise AssertionError("rules_only 不应触达 LLM")
+
+    monkeypatch.setattr("app.services.classifier.get_llm_client", _tracking_llm)
+
+    result = tasks_ingest.reclassify_pending.delay(rules_only=True).get()
+    assert result == {"resolved": 1, "remaining": 1}
+    assert llm_calls == []  # 零 LLM 成本
+
+    hit = db_session.get(ReviewItem, hit_id)
+    assert hit.status == ReviewStatus.APPROVED
+    assert hit.suggested_category == "日用"
+    assert hit.confidence == 1.0
+    assert len(fake_firefly.calls) == 1
+    assert fake_firefly.calls[0]["category"] == "日用"
+
+    miss = db_session.get(ReviewItem, miss_id)
+    assert miss.status == ReviewStatus.PENDING
+    assert miss.suggested_category == "餐饮"  # 原建议原样保留
+
+
+def test_reclassify_single_failure_does_not_abort(
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls, monkeypatch
+):
+    """坏 payload 单条失败:记日志跳过,其余照常处理。"""
+    bad_id = _seed_pending(db_session, celery_eager, "坏数据店", "rc-05")
+    good_id = _seed_pending(db_session, celery_eager, "好数据店", "rc-06")
+    bad = db_session.get(ReviewItem, bad_id)
+    bad.txn_payload = {"bad": "payload"}
+    db_session.commit()
+
+    class HighLLM:
+        def classify_transaction(self, txn, categories) -> LLMClassification:
+            return LLMClassification(category="购物", confidence=0.95, rationale="高")
+
+    monkeypatch.setattr("app.services.classifier.get_llm_client", lambda: HighLLM())
+
+    result = tasks_ingest.reclassify_pending.delay(rules_only=False).get()
+    assert result == {"resolved": 1, "remaining": 1}
+    assert db_session.get(ReviewItem, good_id).status == ReviewStatus.APPROVED
+    assert db_session.get(ReviewItem, bad_id).status == ReviewStatus.PENDING
+
+
 def test_handle_firefly_event_records_audit(db_session, celery_eager):
     payload = {"trigger": "STORE_TRANSACTION", "content": {"id": 1}}
 

@@ -105,6 +105,7 @@ def test_upload_alipay_202(client, ingest_delay):
     assert body["enqueued"] == 2
     assert body["skipped"] == 2  # 不计收支 + 退款
     assert body["trace_id"]
+    assert body["source"] == "alipay"
 
     assert ingest_delay.call_count == 2
     # 整批共用同一个 trace_id,且与响应一致
@@ -129,6 +130,7 @@ def test_upload_wechat_202(client, ingest_delay):
     body = resp.json()
     assert body["enqueued"] == 2
     assert body["skipped"] == 1  # "/" 中性流水
+    assert body["source"] == "wechat"
 
     assert ingest_delay.call_count == 2
     first = ingest_delay.call_args_list[0].args[0]
@@ -137,6 +139,38 @@ def test_upload_wechat_202(client, ingest_delay):
     assert first["amount"] == "6.00"  # ¥ 前缀已清洗
     assert first["account_hint"] == "零钱"
     assert ingest_delay.call_args_list[0].args[1] == body["trace_id"]
+
+
+# ---------- upload:source=auto ----------
+
+
+def test_upload_auto_detects_alipay(client, ingest_delay):
+    resp = _upload(client, "auto", ALIPAY_CSV)
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["source"] == "alipay"
+    assert body["enqueued"] == 2
+    assert body["skipped"] == 2
+    assert ingest_delay.call_count == 2
+    assert ingest_delay.call_args_list[0].args[0]["source"] == "alipay"
+
+
+def test_upload_auto_detects_wechat(client, ingest_delay):
+    resp = _upload(client, "auto", WECHAT_CSV)
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["source"] == "wechat"
+    assert body["enqueued"] == 2
+    assert body["skipped"] == 1
+    assert ingest_delay.call_args_list[0].args[0]["source"] == "wechat"
+
+
+def test_upload_auto_unrecognized_400(client, ingest_delay):
+    # 无任何渠道特征:识别失败 -> 400
+    resp = _upload(client, "auto", "交易时间,收/支,金额\n2026-07-01 12:00:00,支出,1.00\n".encode())
+    assert resp.status_code == 400
+    assert "无法自动识别账单渠道" in resp.json()["detail"]
+    ingest_delay.assert_not_called()
 
 
 # ---------- webhook ----------
