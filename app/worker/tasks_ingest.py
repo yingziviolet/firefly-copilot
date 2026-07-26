@@ -211,12 +211,14 @@ def reclassify_pending(self, rules_only: bool = False) -> dict[str, Any]:
                 # 无论达标与否都刷新建议,让人工看到更好的候选
                 item.suggested_category = suggestion.category
                 item.confidence = suggestion.confidence
-                if suggestion.confidence < settings.confidence_threshold:
-                    continue
-                review.approve(session, item.id)
-                _import_reviewed_item(self, session, item)
-                resolved += 1
+                if suggestion.confidence >= settings.confidence_threshold:
+                    review.approve(session, item.id)
+                    _import_reviewed_item(self, session, item)
+                    resolved += 1
+                # 逐笔提交:页面进度实时可见,中途中断已完成项也不回滚
+                session.commit()
             except Exception as exc:
+                session.rollback()
                 logger.warning("reclassify_item_failed", item_id=item.id, error=str(exc))
         remaining = len(items) - resolved
     logger.info("reclassify_done", rules_only=rules_only, resolved=resolved, remaining=remaining)
