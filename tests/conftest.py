@@ -12,6 +12,7 @@ os.environ["FIREFLY_BASE_URL"] = "http://firefly.test"
 os.environ["FIREFLY_PAT"] = "test-pat"
 os.environ["FIREFLY_WEBHOOK_SECRET"] = "test-secret"
 os.environ["ANTHROPIC_API_KEY"] = "test-key"
+os.environ["WECOM_WEBHOOK_URL"] = ""
 
 import pytest  # noqa: E402
 

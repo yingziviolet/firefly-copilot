@@ -25,6 +25,17 @@ class FakeFirefly:
         return self.splits
 
 
+class WeeklyFirefly:
+    def __init__(self, withdrawals, deposits):
+        self.withdrawals = withdrawals
+        self.deposits = deposits
+        self.calls = []
+
+    def list_transactions(self, start, end, txn_type: str = "withdrawal"):
+        self.calls.append((start, end, txn_type))
+        return self.deposits if txn_type == "deposit" else self.withdrawals
+
+
 def _split(dest: str, amount: str, dt: str, journal: str) -> dict[str, Any]:
     return {
         "description": "订阅扣费",
@@ -98,6 +109,25 @@ def test_no_duplicates_no_alert(monkeypatch, sent):
     assert sent == []
 
 
+def test_multiple_duplicate_groups_are_sent_as_one_message(monkeypatch, sent):
+    fake = FakeFirefly(
+        splits=[
+            _split("爱奇艺", "25", "2026-07-24", "1"),
+            _split("爱奇艺", "25", "2026-07-25", "2"),
+            _split("网约车", "18", "2026-07-24", "3"),
+            _split("网约车", "18", "2026-07-25", "4"),
+        ]
+    )
+    _use_fake_firefly(monkeypatch, fake)
+
+    result = tasks_sentinel.scan_duplicate_charges.run()
+
+    assert result == {"groups": 2, "checked": 4}
+    assert len(sent) == 1
+    assert "爱奇艺" in sent[0]["text"]
+    assert "网约车" in sent[0]["text"]
+
+
 def test_firefly_error_returns_error_dict(monkeypatch, sent):
     fake = FakeFirefly(exc=FireflyError("Firefly API GET failed: HTTP 500, body='boom'"))
     _use_fake_firefly(monkeypatch, fake)
@@ -106,4 +136,47 @@ def test_firefly_error_returns_error_dict(monkeypatch, sent):
 
     assert set(result) == {"error"}
     assert "boom" in result["error"]
+    assert sent == []
+
+
+def test_weekly_digest_sends_one_complete_message(monkeypatch, sent):
+    withdrawals = [
+        {**_split("美团外卖", "50", "2026-07-20", "1"), "category_name": "餐饮"},
+        {**_split("便利店", "20", "2026-07-21", "2"), "category_name": "日用"},
+        {**_split("便利店", "20", "2026-07-22", "3"), "category_name": "日用"},
+        _split("视频会员", "25", "2026-05-27", "4"),
+        _split("视频会员", "25", "2026-06-26", "5"),
+        _split("视频会员", "30", "2026-07-26", "6"),
+    ]
+    deposits = [
+        {
+            "source_name": "工资",
+            "amount": "5000",
+            "date": "2026-07-25",
+            "category_name": "工资",
+        }
+    ]
+    fake = WeeklyFirefly(withdrawals, deposits)
+    _use_fake_firefly(monkeypatch, fake)
+
+    result = tasks_sentinel.send_weekly_digest.run(today_iso="2026-07-27")
+
+    assert result == {"withdrawals": 4, "deposits": 1, "subscriptions": 1, "duplicates": 1}
+    assert len(sent) == 1
+    text = sent[0]["text"]
+    assert "2026-07-20 至 2026-07-26" in text
+    assert "总收入:5000" in text
+    assert "总支出:120" in text
+    assert "餐饮:50" in text
+    assert "视频会员" in text
+    assert "25 → 30" in text
+    assert "便利店" in text
+
+
+def test_weekly_digest_firefly_error_does_not_notify(monkeypatch, sent):
+    _use_fake_firefly(monkeypatch, FakeFirefly(exc=FireflyError("boom")))
+
+    result = tasks_sentinel.send_weekly_digest.run(today_iso="2026-07-27")
+
+    assert result == {"error": "boom"}
     assert sent == []

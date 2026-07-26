@@ -1,6 +1,6 @@
 """LLMClient 单元测试:注入假 anthropic 客户端,禁真实网络。"""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -11,6 +11,7 @@ import pytest
 from app.config import get_settings
 from app.llm.client import LLMClient, LLMError, get_llm_client
 from app.schemas.classify import DEFAULT_CATEGORIES, LLMClassification
+from app.schemas.finance import FinanceQuery
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 
 
@@ -127,6 +128,27 @@ def test_system_prompt_contains_all_categories() -> None:
     for category in DEFAULT_CATEGORIES:
         assert category in system
     assert "只能从列表中选" in system
+
+
+def test_parse_finance_query_uses_restricted_schema() -> None:
+    expected = FinanceQuery(
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 30),
+        category="餐饮",
+        metric="sum",
+    )
+    fake = _FakeAnthropic([expected])
+
+    result = LLMClient(client=fake).parse_finance_query(
+        "上月餐饮花了多少", today=date(2026, 7, 27)
+    )
+
+    assert result is expected
+    call = fake.messages.calls[0]
+    assert call["output_format"] is FinanceQuery
+    assert "2026-07-27" in call["system"]
+    assert "不得生成 SQL" in call["system"]
+    assert call["messages"][0]["content"] == "上月餐饮花了多少"
 
 
 def test_get_llm_client_is_cached_singleton() -> None:

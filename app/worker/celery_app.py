@@ -23,9 +23,9 @@ celery_app.conf.update(
     accept_content=["json"],
     result_serializer="json",
     beat_schedule={
-        "scan-duplicate-charges-daily": {
-            "task": "app.worker.tasks_sentinel.scan_duplicate_charges",
-            "schedule": crontab(hour=9, minute=0),
+        "send-weekly-digest": {
+            "task": "app.worker.tasks_sentinel.send_weekly_digest",
+            "schedule": crontab(hour=9, minute=0, day_of_week=1),
         },
     },
 )

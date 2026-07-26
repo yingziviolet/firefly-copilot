@@ -3,11 +3,12 @@
 外部副作用全部 mock:finalize_review.delay / ingest_transaction.delay。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 from urllib.parse import unquote_plus
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -15,6 +16,7 @@ from app.config import get_settings
 from app.models.review import ReviewItem, ReviewStatus
 from app.models.rule import Rule, RuleMatchType
 from app.schemas.classify import ClassificationResult
+from app.schemas.finance import FinanceQuery
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 from app.services import review
 from app.worker.tasks_ingest import finalize_review, ingest_transaction, reclassify_pending
@@ -81,6 +83,7 @@ def test_console_page_empty_state(client):
     # 快捷记账与上传表单始终存在
     assert 'action="/review/quick"' in resp.text
     assert 'action="/review/upload"' in resp.text
+    assert 'action="/review/query"' in resp.text
     assert 'name="viewport"' in resp.text
 
 
@@ -269,6 +272,104 @@ def test_quick_expense_unparseable_redirects(client, ingest_delay):
     assert resp.status_code == 303
     assert "没看懂" in unquote_plus(resp.headers["location"])
     ingest_delay.assert_not_called()
+
+
+# ---------- 自然语言查账 ----------
+
+
+def test_finance_query_returns_deterministic_sum(client, monkeypatch):
+    from app.api import routes_review
+
+    class FakeLLM:
+        def parse_finance_query(self, question, today):
+            assert question == "上月餐饮花了多少"
+            assert today == date.today()
+            return FinanceQuery(
+                start=date(2026, 6, 1),
+                end=date(2026, 6, 30),
+                category="餐饮",
+            )
+
+    class FakeFirefly:
+        def list_transactions(self, start, end, txn_type):
+            assert (start, end, txn_type) == (
+                date(2026, 6, 1),
+                date(2026, 6, 30),
+                "withdrawal",
+            )
+            return [
+                {
+                    "date": "2026-06-02",
+                    "amount": "12.10",
+                    "destination_name": "餐厅",
+                    "category_name": "餐饮",
+                },
+                {
+                    "date": "2026-06-03",
+                    "amount": "7.90",
+                    "destination_name": "咖啡店",
+                    "category_name": "餐饮",
+                },
+            ]
+
+    monkeypatch.setattr(routes_review, "get_llm_client", lambda: FakeLLM())
+    monkeypatch.setattr(routes_review, "get_firefly_client", lambda: FakeFirefly())
+
+    resp = client.post(
+        "/review/query",
+        data={"question": "上月餐饮花了多少"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    message = unquote_plus(resp.headers["location"])
+    assert "2026-06-01 至 2026-06-30" in message
+    assert "餐饮" in message
+    assert "合计 20.00 CNY" in message
+
+
+def test_finance_query_llm_error_is_shown(client, monkeypatch):
+    from app.api import routes_review
+    from app.llm.client import LLMError
+
+    class FakeLLM:
+        def parse_finance_query(self, question, today):
+            raise LLMError("不支持的问题")
+
+    monkeypatch.setattr(routes_review, "get_llm_client", lambda: FakeLLM())
+
+    resp = client.post(
+        "/review/query",
+        data={"question": "帮我推荐股票"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert "暂时没法查询" in unquote_plus(resp.headers["location"])
+
+
+def test_finance_query_network_error_is_shown(client, monkeypatch):
+    from app.api import routes_review
+
+    class FakeLLM:
+        def parse_finance_query(self, question, today):
+            return FinanceQuery(start=date(2026, 6, 1), end=date(2026, 6, 30))
+
+    class OfflineFirefly:
+        def list_transactions(self, start, end, txn_type):
+            raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(routes_review, "get_llm_client", lambda: FakeLLM())
+    monkeypatch.setattr(routes_review, "get_firefly_client", lambda: OfflineFirefly())
+
+    resp = client.post(
+        "/review/query",
+        data={"question": "上月花了多少"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert "暂时没法查询" in unquote_plus(resp.headers["location"])
 
 
 # ---------- CSV 上传表单 ----------

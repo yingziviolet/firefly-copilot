@@ -1,6 +1,6 @@
 # Firefly Copilot
 
-基于 [Firefly III](https://github.com/firefly-iii/firefly-iii) 的智能记账增强服务。它不修改 Firefly III 源码,而是以独立服务的方式通过 REST API + Webhook 集成:多渠道账单(支付宝 / 微信 CSV)接入后,先走本地规则库、再走 LLM 自动分类;高置信度的交易直接写入 Firefly III,低置信度的进入人工复核队列,在内置 Web 控制台按钮裁决;用户的每次改正会自动回流成规则,让系统越用越准。全链路按 trace_id 落审计日志,并内置"重复扣费哨兵"定时巡检,告警推送企业微信。
+基于 [Firefly III](https://github.com/firefly-iii/firefly-iii) 的智能记账增强服务。它不修改 Firefly III 源码,而是以独立服务的方式通过 REST API + Webhook 集成:多渠道账单(支付宝 / 微信 CSV)接入后,先走本地规则库、再走 LLM 自动分类;高置信度的交易直接写入 Firefly III,低置信度的进入人工复核队列,在内置 Web 控制台按钮裁决;用户的每次改正会自动回流成规则,让系统越用越准。全链路按 trace_id 落审计日志,每周把收支、订阅涨价和疑似重复扣费汇总成一条企业微信简报。
 
 ## 技术栈
 
@@ -30,7 +30,7 @@ flowchart LR
     subgraph Worker["Celery worker / beat"]
         ING[ingest_transaction<br/>指纹去重 → 分类 → 置信度门控]
         FIN[finalize_review]
-        SEN[哨兵:重复扣费扫描<br/>每日 09:00]
+        SEN[周报:收支 / 订阅 / 重复扣费<br/>每周一 09:00]
     end
 
     RULES[(规则库)]
@@ -39,7 +39,7 @@ flowchart LR
     FF[Firefly III API]
 
     subgraph Review["人工复核"]
-        WEB[Web 控制台 /review<br/>批准 / 改分类 / 驳回]
+        WEB[Web 控制台 /review<br/>记账 / 查账 / 复核]
     end
 
     NOTIFY[告警:企业微信群机器人]
@@ -65,10 +65,12 @@ flowchart LR
 - **指纹去重**:同一笔交易(CSV 重复导入、webhook 重放、任务重试)只入库一次
 - **两级自动分类**:本地规则库(商户 → 分类)命中即免 LLM;未命中走 LLM 分类,LLM 走 Anthropic Messages API 协议
 - **置信度门控**:置信度达阈值(默认 0.9)直接写入 Firefly III;不达标进入人工复核队列
-- **Web 复核控制台**:`/review` 一页完成快捷记账、CSV 上传、待复核裁决(批准 / 改分类 / 驳回),手机浏览器可用,`CONSOLE_TOKEN` 鉴权
+- **Web 复核控制台**:`/review` 一页完成快捷记账、自然语言查账、CSV 上传、待复核裁决(批准 / 改分类 / 驳回),手机浏览器可用,`CONSOLE_TOKEN` 鉴权
 - **人工复核闭环**:低置信度交易进入复核队列,Web 控制台按钮裁决,裁决后异步写入 Firefly III
 - **规则自学习**:人工改正的分类自动回流规则库,同商户后续免 LLM
-- **异常检测哨兵**:每日定时扫描近几天的支出,发现同商户同金额的疑似重复扣费即推送企业微信告警
+- **每周财务简报**:每周一 09:00 汇总上周收支、支出分类、订阅涨价与疑似重复扣费,整轮只推送一条企业微信消息
+- **订阅管家**:按商户与月度扣费周期识别持续订阅,比较最近两期金额并标记涨价
+- **自然语言查账**:支持「上月餐饮花了多少」「今年打车多少笔」等聚合问题;LLM 只生成受限查询参数,不生成 SQL
 - **全链路审计**:一笔账从接入到入库的每一步都按 trace_id 落审计日志
 - **Firefly Webhook 接收**:HMAC 验签后落队列处理
 
@@ -160,7 +162,7 @@ celery -A app.worker.celery_app beat -l INFO       # Beat(哨兵定时任务)
 curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=alipay"
 ```
 
-返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易。更省事的方式是直接打开 **`http://localhost:8000/review`**——快捷记账(输入「早餐 15」)、上传 CSV、复核裁决都在这一页;低置信度交易会推提醒到企业微信。
+返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易。更省事的方式是直接打开 **`http://localhost:8000/review`**——快捷记账(输入「早餐 15」)、自然语言查账、上传 CSV、复核裁决都在这一页;低置信度交易会推提醒到企业微信。
 
 ## 日常使用
 
@@ -169,12 +171,19 @@ curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=a
 | 场景 | 操作 |
 | --- | --- |
 | 随手记一笔 | 打开 `http://localhost:8000/review`,输入「早餐 15」「昨天 打车 23.5」提交,自动分类入账 |
+| 自然语言查账 | 在 `/review` 输入「上月餐饮花了多少」「今年打车多少笔」;支持最长 366 天、收入/支出、分类/商户与合计/笔数 |
 | 批量导账单 | 支付宝/微信 App 导出账单(CSV 或新版 XLSX 都行),在 `/review` 页选择渠道上传;重复导入同一文件不会记重 |
 | 处理待复核 | 低置信度交易出现在 `/review` 卡片列表(企业微信也会提醒),点 批准 / 改分类 / 驳回;**每改正一次,同商户下次自动分对** |
 | 看账本报表 | `http://localhost:8080`(Firefly III 自带仪表盘、分类统计、预算管理) |
-| 重复扣费提醒 | 无需操作,每天 09:00 哨兵自动扫描,命中即推企业微信告警 |
+| 每周财务简报 | 无需操作,每周一 09:00 推送上一完整自然周;收支、订阅和重复扣费合并为一条消息 |
 | 启动 / 停止 | `docker compose up -d` / `docker compose down`(数据保存在 Docker 卷里,停了不丢) |
 | 排查问题 | `docker compose run --rm api python -m app.doctor` 逐项体检;`docker compose logs -f worker` 看处理日志 |
+
+更新代码后执行 `docker compose up -d --build --force-recreate api worker beat`。想立即试看周报而不等到周一:
+
+```bash
+docker compose exec worker celery -A app.worker.celery_app call app.worker.tasks_sentinel.send_weekly_digest
+```
 
 ## 本地开发
 
@@ -247,16 +256,18 @@ docker compose restart firefly   # 8080 打不开重启 firefly;8000 打不开�
 - [x] 交易指纹去重(幂等入库)
 - [x] 规则库 + LLM 两级分类,置信度门控
 - [x] 人工复核闭环(Web 控制台裁决),改正自动回流规则库
-- [x] 重复扣费哨兵(Celery beat 每日巡检 + 企业微信告警)
+- [x] 重复扣费哨兵
 - [x] 全链路 trace_id 审计日志
 - [x] Firefly webhook 验签接收(P1 仅落审计)
 - [x] Alembic 迁移、Docker Compose 部署、GitHub Actions CI
 
-### P2(计划)
+### P2(已实现)
 
-- [ ] 邮件账单 / 银行流水等更多接入渠道
-- [ ] 更多哨兵规则:预算超支预警、订阅涨价检测、大额异常支出
-- [ ] Firefly webhook 事件深度处理(双向同步、账单变更联动)
-- [ ] 周报 / 月报自动生成与推送
-- [ ] 规则库管理界面(查看 / 编辑 / 禁用规则)
-- [ ] 多用户与权限隔离
+- [x] 每周财务简报单次推送
+- [x] 订阅周期识别与涨价检测
+- [x] 受限自然语言查账
+
+### 后续
+
+- [ ] 本地设置与状态页(Key 只显示配置状态,不回显完整密钥)
+- [ ] 周报趋势图与任务运行状态

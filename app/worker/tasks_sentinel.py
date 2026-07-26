@@ -9,13 +9,14 @@ Firefly 不可达时记日志返回 {"error": ...},不抛异常(避免 beat 无�
 """
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 
 from app.logger import get_logger
+from app.services.finance import detect_subscriptions
 from app.services.firefly_client import FireflyError, get_firefly_client
 from app.services.notifier import notify
 from app.worker.celery_app import celery_app
@@ -51,6 +52,92 @@ def _build_alert_text(splits: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _split_date(split: dict[str, Any]) -> date | None:
+    try:
+        return datetime.fromisoformat(str(split.get("date")).replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _duplicate_groups(splits: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for split in splits:
+        merchant = _normalize_merchant(split.get("destination_name"))
+        if merchant:
+            groups[(merchant, _normalize_amount(split.get("amount")))].append(split)
+    return [grouped for grouped in groups.values() if len(grouped) >= 2]
+
+
+def _sum_amounts(splits: list[dict[str, Any]]) -> Decimal:
+    total = Decimal()
+    for split in splits:
+        try:
+            total += Decimal(str(split.get("amount")))
+        except (InvalidOperation, ValueError):
+            continue
+    return total
+
+
+def _build_weekly_text(
+    start: date,
+    end: date,
+    withdrawals: list[dict[str, Any]],
+    deposits: list[dict[str, Any]],
+    subscriptions: list[dict[str, Any]],
+    duplicates: list[list[dict[str, Any]]],
+) -> str:
+    expense = _sum_amounts(withdrawals)
+    income = _sum_amounts(deposits)
+    categories: dict[str, Decimal] = defaultdict(Decimal)
+    for split in withdrawals:
+        category = str(split.get("category_name") or "未分类")
+        try:
+            categories[category] += Decimal(str(split.get("amount")))
+        except (InvalidOperation, ValueError):
+            continue
+
+    lines = [
+        "每周财务简报",
+        f"{start.isoformat()} 至 {end.isoformat()}",
+        "",
+        "收支概览",
+        f"总收入:{income}",
+        f"总支出:{expense}",
+        f"净额:{income - expense}",
+        f"交易:收入 {len(deposits)} 笔 / 支出 {len(withdrawals)} 笔",
+        "",
+        "支出分类",
+    ]
+    lines.extend(
+        f"- {category}:{amount}"
+        for category, amount in sorted(categories.items(), key=lambda item: item[1], reverse=True)
+    )
+    if not categories:
+        lines.append("- 无支出")
+
+    lines.extend(["", "订阅管家"])
+    if subscriptions:
+        for item in subscriptions:
+            detail = f"- {item['merchant']}:{item['latest_amount']}"
+            if item["price_increased"]:
+                detail += f"（涨价 {item['previous_amount']} → {item['latest_amount']}）"
+            lines.append(detail)
+    else:
+        lines.append("- 本周未发现订阅涨价或持续扣费")
+
+    lines.extend(["", "重复扣费"])
+    if duplicates:
+        for grouped in duplicates:
+            first = grouped[0]
+            lines.append(
+                f"- {str(first.get('destination_name') or '未知商户').strip()} "
+                f"{first.get('amount', '?')}，共 {len(grouped)} 笔"
+            )
+    else:
+        lines.append("- 本周未发现疑似重复扣费")
+    return "\n".join(lines)
+
+
 @celery_app.task(name="app.worker.tasks_sentinel.scan_duplicate_charges")
 def scan_duplicate_charges(days: int = 3) -> dict[str, Any]:
     end = date.today()
@@ -61,20 +148,50 @@ def scan_duplicate_charges(days: int = 3) -> dict[str, Any]:
         logger.warning("sentinel_firefly_unreachable", error=str(exc))
         return {"error": str(exc)}
 
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for split in splits:
-        merchant = _normalize_merchant(split.get("destination_name"))
-        if not merchant:
-            # 无商户名无法判定重复,跳过分组(仍计入 checked)
-            continue
-        groups[(merchant, _normalize_amount(split.get("amount")))].append(split)
-
-    hit = 0
-    for (merchant, amount), grouped in groups.items():
-        if len(grouped) < 2:
-            continue
-        hit += 1
-        if not notify(_build_alert_text(grouped)):
-            logger.warning("sentinel_alert_send_failed", merchant=merchant, amount=amount)
+    groups = _duplicate_groups(splits)
+    if groups and not notify("\n\n".join(_build_alert_text(grouped) for grouped in groups)):
+        logger.warning("sentinel_alert_send_failed", groups=len(groups))
+    hit = len(groups)
     logger.info("sentinel_scan_done", checked=len(splits), groups=hit)
     return {"groups": hit, "checked": len(splits)}
+
+
+@celery_app.task(name="app.worker.tasks_sentinel.send_weekly_digest")
+def send_weekly_digest(today_iso: str | None = None) -> dict[str, Any]:
+    today = date.fromisoformat(today_iso) if today_iso else date.today()
+    end = today - timedelta(days=today.weekday() + 1)
+    start = end - timedelta(days=6)
+    history_start = end - timedelta(days=119)
+    try:
+        client = get_firefly_client()
+        history = client.list_transactions(history_start, end, txn_type="withdrawal")
+        deposits = client.list_transactions(start, end, txn_type="deposit")
+    except (FireflyError, httpx.HTTPError) as exc:
+        logger.warning("weekly_digest_firefly_unreachable", error=str(exc))
+        return {"error": str(exc)}
+
+    withdrawals = [
+        split
+        for split in history
+        if (occurred := _split_date(split)) is not None and start <= occurred <= end
+    ]
+    subscriptions = detect_subscriptions(history, as_of=end)
+    duplicates = _duplicate_groups(withdrawals)
+    text = _build_weekly_text(
+        start, end, withdrawals, deposits, subscriptions, duplicates
+    )
+    if not notify(text):
+        logger.warning("weekly_digest_send_failed")
+    logger.info(
+        "weekly_digest_done",
+        withdrawals=len(withdrawals),
+        deposits=len(deposits),
+        subscriptions=len(subscriptions),
+        duplicates=len(duplicates),
+    )
+    return {
+        "withdrawals": len(withdrawals),
+        "deposits": len(deposits),
+        "subscriptions": len(subscriptions),
+        "duplicates": len(duplicates),
+    }

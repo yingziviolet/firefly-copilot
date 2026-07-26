@@ -2,6 +2,7 @@
 
 GET  /review                  控制台页面(提示条 + 快捷记账 + CSV/XLSX 上传 + 待复核卡片)
 POST /review/quick            快捷记账(parse_quick_expense 文本解析)
+POST /review/query            自然语言查账(LLM 只解析受限参数,程序聚合)
 POST /review/upload           CSV/XLSX 上传(复用 routes_upload.enqueue_csv)
 POST /review/{id}/approve     批准 -> finalize_review.delay
 POST /review/{id}/correct     改分类(回流规则库)-> finalize_review.delay
@@ -17,10 +18,11 @@ POST /review/reclassify       触发 reclassify_pending.delay(rules_only=False)
 
 import html
 import secrets
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
+import httpx
 from fastapi import APIRouter, Depends, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
@@ -28,12 +30,15 @@ from sqlalchemy.orm import Session
 from app.api.routes_upload import enqueue_csv
 from app.config import get_settings
 from app.db import get_session
+from app.llm.client import LLMError, get_llm_client
 from app.logger import get_logger, new_trace_id
 from app.models.review import ReviewItem
 from app.parsers.base import ParseError
 from app.parsers.quick_text import parse_quick_expense
 from app.schemas.classify import DEFAULT_CATEGORIES
 from app.services import review
+from app.services.finance import aggregate_transactions
+from app.services.firefly_client import FireflyError, get_firefly_client
 from app.worker.tasks_ingest import finalize_review, ingest_transaction, reclassify_pending
 
 logger = get_logger(__name__)
@@ -182,6 +187,14 @@ def _render_page(msg: str, items: list[ReviewItem]) -> str:
   </form>
 </section>
 <section class="panel">
+  <h2>自然语言查账</h2>
+  <form method="post" action="/review/query" class="row">
+    <input type="text" name="question"
+      placeholder="例如:上月餐饮花了多少 / 今年打车多少笔" required>
+    <button type="submit">查账</button>
+  </form>
+</section>
+<section class="panel">
   <h2>上传账单 CSV / XLSX</h2>
   <form method="post" action="/review/upload" enctype="multipart/form-data" class="row">
     <select name="source">
@@ -236,6 +249,32 @@ def console_quick(text: Annotated[str, Form()] = "") -> RedirectResponse:
         amount=str(txn.amount),
     )
     return _redirect_with_msg(f"已收到:{txn.counterparty} {txn.amount} {txn.currency},正在入账处理")
+
+
+@router.post("/review/query")
+def console_query(question: Annotated[str, Form()] = "") -> RedirectResponse:
+    if not question.strip():
+        return _redirect_with_msg("请输入查账问题")
+    try:
+        query = get_llm_client().parse_finance_query(question.strip(), date.today())
+        splits = get_firefly_client().list_transactions(
+            query.start, query.end, txn_type=query.transaction_type
+        )
+    except (LLMError, FireflyError, httpx.HTTPError) as exc:
+        logger.warning("console_finance_query_failed", error=str(exc))
+        return _redirect_with_msg("暂时没法查询，请换一种明确问法后重试")
+
+    result = aggregate_transactions(splits, query)
+    direction = "收入" if query.transaction_type == "deposit" else "支出"
+    filters = " ".join(value for value in (query.category, query.merchant) if value)
+    subject = f"{direction} {filters}".strip()
+    if query.metric == "count":
+        summary = f"共 {result} 笔"
+    else:
+        summary = f"合计 {result} {get_settings().default_currency}"
+    return _redirect_with_msg(
+        f"查询结果:{query.start.isoformat()} 至 {query.end.isoformat()}，{subject}，{summary}"
+    )
 
 
 # 渠道 -> 中文名,用于上传成功提示
