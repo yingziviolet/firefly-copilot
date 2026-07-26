@@ -70,18 +70,44 @@ flowchart LR
 
 ## 快速开始
 
-### 1. 起基础设施(Firefly III + PostgreSQL + Redis)
+### 一键启动(推荐)
+
+唯一前置条件:装好 [Docker Desktop](https://www.docker.com/products/docker-desktop/)(Windows / macOS)或 [Docker Engine](https://docs.docker.com/engine/install/)(Linux 服务器)。然后:
+
+```powershell
+# Windows(PowerShell)
+.\scripts\setup.ps1
+```
 
 ```bash
-# 准备 Firefly III 自身的配置(参考 Firefly III 官方文档)
-# 至少需要 APP_KEY、DB_* 等变量,写入 .env.firefly
+# Linux / macOS
+./scripts/setup.sh
+```
 
+脚本自动完成:生成 `.env` 和 `.env.firefly`(含随机 APP_KEY)→ 构建镜像 → 按依赖顺序拉起全部服务(api 容器启动时自动执行数据库迁移)。
+
+之后只剩一次性的账号配置(密钥只能人来创建,脚本最后也会打印这份清单):
+
+1. 打开 `http://localhost:8080` 注册 Firefly III 账号;Profile → OAuth → 创建 Personal Access Token
+2. Telegram:找 @BotFather `/newbot` 拿 bot token;找 @userinfobot 拿自己的数字 user id
+3. 把 `FIREFLY_PAT`、`ANTHROPIC_API_KEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USER_IDS`、`TELEGRAM_ALERT_CHAT_ID` 填进 `.env`
+4. 应用配置:`docker compose up -d --force-recreate api worker beat bot`
+5. 自检:`docker compose run --rm api python -m app.doctor`——逐项告诉你哪里没配好、怎么配
+
+日常使用:`docker compose up -d` 启动全部,`docker compose down` 停止。
+
+### 手动分步(可选,想了解每一步时看这里)
+
+#### 1. 起基础设施(Firefly III + PostgreSQL + Redis)
+
+```bash
+# 复制 .env.firefly.example 为 .env.firefly 并生成 APP_KEY(32 位随机串)
 docker compose up -d firefly firefly-db agent-db redis
 ```
 
 启动后访问 `http://localhost:8080` 完成 Firefly III 初始化,创建 Personal Access Token(PAT)。
 
-### 2. 配置 .env
+#### 2. 配置 .env
 
 ```bash
 cp .env.example .env
@@ -99,15 +125,15 @@ cp .env.example .env
 | `CONFIDENCE_THRESHOLD` | 自动入账的置信度阈值,默认 `0.9` |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USER_IDS` / `TELEGRAM_ALERT_CHAT_ID` | Telegram 机器人配置 |
 
-### 3. 数据库迁移
+#### 3. 数据库迁移
 
 ```bash
 alembic upgrade head
 ```
 
-迁移 URL 优先读环境变量 `DATABASE_URL`,未设置时回退到 `.env` 里的配置。
+迁移 URL 优先读环境变量 `DATABASE_URL`,未设置时回退到 `.env` 里的配置。Docker 方式下 api 容器启动时会自动执行,无需手动跑。
 
-### 4. 启动服务
+#### 4. 启动服务
 
 Docker 方式(推荐):
 
@@ -124,7 +150,7 @@ celery -A app.worker.celery_app beat -l INFO       # Beat(哨兵定时任务)
 python -m app.bot.runner                           # Telegram Bot(长轮询)
 ```
 
-### 5. 试一笔
+#### 5. 试一笔
 
 ```bash
 curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=alipay"
@@ -167,9 +193,12 @@ app/
 └── main.py             # FastAPI 应用工厂
 alembic/                # 数据库迁移
 docker/                 # Dockerfile
+scripts/                # 一键部署脚本(setup.ps1 / setup.sh)
 tests/                  # pytest(内存 SQLite + Celery eager + respx)
 docker-compose.yml      # Firefly III + PG x2 + Redis + api/worker/beat/bot
 ```
+
+排障自检:`python -m app.doctor`(容器内:`docker compose run --rm api python -m app.doctor`),逐项检查配置与依赖服务连通性;加 `--llm` 可做一次真实 LLM 分类实测。
 
 ## Roadmap
 

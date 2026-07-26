@@ -18,7 +18,8 @@ def get_engine() -> Engine:
         return create_engine(
             url, connect_args={"check_same_thread": False}, poolclass=StaticPool
         )
-    return create_engine(url, pool_pre_ping=True)
+    # connect_timeout:数据库不可达时快速失败(秒)
+    return create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 5})
 
 
 @lru_cache
