@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.finance import FinanceQuery
-from app.services.finance import aggregate_transactions, detect_subscriptions
+from app.services.finance import aggregate_transactions, detect_subscriptions, format_money
 
 
 def _split(
@@ -27,6 +27,12 @@ def test_finance_query_rejects_invalid_date_ranges():
         FinanceQuery(start=date(2026, 7, 2), end=date(2026, 7, 1))
     with pytest.raises(ValidationError):
         FinanceQuery(start=date(2025, 1, 1), end=date(2026, 7, 1))
+
+
+def test_format_money_always_uses_two_decimal_places():
+    assert format_money(Decimal("150.000000000000")) == "150.00"
+    assert format_money(Decimal("335.050000000000")) == "335.05"
+    assert format_money(Decimal("0.020000000000")) == "0.02"
 
 
 def test_aggregate_filters_and_sums_with_decimal():

@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from app.logger import get_logger
-from app.services.finance import detect_subscriptions
+from app.services.finance import detect_subscriptions, format_money
 from app.services.firefly_client import FireflyError, get_firefly_client
 from app.services.notifier import notify
 from app.worker.celery_app import celery_app
@@ -41,7 +41,7 @@ def _build_alert_text(splits: list[dict[str, Any]]) -> str:
     """单组告警文本:商户、金额、组内各笔日期。"""
     first = splits[0]
     merchant = str(first.get("destination_name") or "").strip() or "(未知商户)"
-    amount = first.get("amount", "?")
+    amount = format_money(first.get("amount"))
     lines = [
         "疑似重复扣费提醒",
         f"商户:{merchant}",
@@ -101,15 +101,15 @@ def _build_weekly_text(
         f"{start.isoformat()} 至 {end.isoformat()}",
         "",
         "收支概览",
-        f"总收入:{income}",
-        f"总支出:{expense}",
-        f"净额:{income - expense}",
+        f"总收入:{format_money(income)}",
+        f"总支出:{format_money(expense)}",
+        f"净额:{format_money(income - expense)}",
         f"交易:收入 {len(deposits)} 笔 / 支出 {len(withdrawals)} 笔",
         "",
         "支出分类",
     ]
     lines.extend(
-        f"- {category}:{amount}"
+        f"- {category}:{format_money(amount)}"
         for category, amount in sorted(categories.items(), key=lambda item: item[1], reverse=True)
     )
     if not categories:
@@ -118,9 +118,12 @@ def _build_weekly_text(
     lines.extend(["", "订阅管家"])
     if subscriptions:
         for item in subscriptions:
-            detail = f"- {item['merchant']}:{item['latest_amount']}"
+            detail = f"- {item['merchant']}:{format_money(item['latest_amount'])}"
             if item["price_increased"]:
-                detail += f"（涨价 {item['previous_amount']} → {item['latest_amount']}）"
+                detail += (
+                    f"（涨价 {format_money(item['previous_amount'])}"
+                    f" → {format_money(item['latest_amount'])}）"
+                )
             lines.append(detail)
     else:
         lines.append("- 本周未发现订阅涨价或持续扣费")
@@ -131,7 +134,7 @@ def _build_weekly_text(
             first = grouped[0]
             lines.append(
                 f"- {str(first.get('destination_name') or '未知商户').strip()} "
-                f"{first.get('amount', '?')}，共 {len(grouped)} 笔"
+                f"{format_money(first.get('amount'))}，共 {len(grouped)} 笔"
             )
     else:
         lines.append("- 本周未发现疑似重复扣费")

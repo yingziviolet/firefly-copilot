@@ -20,6 +20,11 @@ def _amount(value: Any) -> Decimal | None:
         return None
 
 
+def format_money(value: Any) -> str:
+    amount = _amount(value)
+    return f"{amount:.2f}" if amount is not None else "?"
+
+
 def _merchant(split: dict[str, Any], transaction_type: str = "withdrawal") -> str:
     field = "source_name" if transaction_type == "deposit" else "destination_name"
     return str(split.get(field) or "").strip()

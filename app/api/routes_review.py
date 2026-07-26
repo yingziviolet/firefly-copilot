@@ -37,7 +37,7 @@ from app.parsers.base import ParseError
 from app.parsers.quick_text import parse_quick_expense
 from app.schemas.classify import DEFAULT_CATEGORIES
 from app.services import review
-from app.services.finance import aggregate_transactions
+from app.services.finance import aggregate_transactions, format_money
 from app.services.firefly_client import FireflyError, get_firefly_client
 from app.worker.tasks_ingest import finalize_review, ingest_transaction, reclassify_pending
 
@@ -271,7 +271,7 @@ def console_query(question: Annotated[str, Form()] = "") -> RedirectResponse:
     if query.metric == "count":
         summary = f"共 {result} 笔"
     else:
-        summary = f"合计 {result} {get_settings().default_currency}"
+        summary = f"合计 {format_money(result)} {get_settings().default_currency}"
     return _redirect_with_msg(
         f"查询结果:{query.start.isoformat()} 至 {query.end.isoformat()}，{subject}，{summary}"
     )

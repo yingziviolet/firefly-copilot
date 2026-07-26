@@ -165,11 +165,11 @@ def test_weekly_digest_sends_one_complete_message(monkeypatch, sent):
     assert len(sent) == 1
     text = sent[0]["text"]
     assert "2026-07-20 至 2026-07-26" in text
-    assert "总收入:5000" in text
-    assert "总支出:120" in text
-    assert "餐饮:50" in text
+    assert "总收入:5000.00" in text
+    assert "总支出:120.00" in text
+    assert "餐饮:50.00" in text
     assert "视频会员" in text
-    assert "25 → 30" in text
+    assert "25.00 → 30.00" in text
     assert "便利店" in text
 
 
