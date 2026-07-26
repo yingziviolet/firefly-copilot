@@ -232,6 +232,13 @@ guiApplications=false
 
 然后 `wsl --shutdown` 并重启 Docker Desktop 即可。
 
+**重启 WSL / Docker 后某个端口打不开(浏览器提示连接被重置)**
+Docker Desktop 的端口转发在 WSL 重启后偶尔会失联,重启对应容器让它重新注册端口即可:
+
+```bash
+docker compose restart firefly   # 8080 打不开重启 firefly;8000 打不开重启 api
+```
+
 ## Roadmap
 
 ### P1(已实现)
