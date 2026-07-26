@@ -162,6 +162,20 @@ curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=a
 
 返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易。更省事的方式是直接打开 **`http://localhost:8000/review`**——快捷记账(输入「早餐 15」)、上传 CSV、复核裁决都在这一页;低置信度交易会推提醒到企业微信。
 
+## 日常使用
+
+两个入口记住就够了:**记账/复核用 `:8000/review`,看报表用 `:8080`**。
+
+| 场景 | 操作 |
+| --- | --- |
+| 随手记一笔 | 打开 `http://localhost:8000/review`,输入「早餐 15」「昨天 打车 23.5」提交,自动分类入账 |
+| 批量导账单 | 支付宝/微信 App 导出账单 CSV,在 `/review` 页选择渠道上传;重复导入同一文件不会记重 |
+| 处理待复核 | 低置信度交易出现在 `/review` 卡片列表(企业微信也会提醒),点 批准 / 改分类 / 驳回;**每改正一次,同商户下次自动分对** |
+| 看账本报表 | `http://localhost:8080`(Firefly III 自带仪表盘、分类统计、预算管理) |
+| 重复扣费提醒 | 无需操作,每天 09:00 哨兵自动扫描,命中即推企业微信告警 |
+| 启动 / 停止 | `docker compose up -d` / `docker compose down`(数据保存在 Docker 卷里,停了不丢) |
+| 排查问题 | `docker compose run --rm api python -m app.doctor` 逐项体检;`docker compose logs -f worker` 看处理日志 |
+
 ## 本地开发
 
 ```bash
