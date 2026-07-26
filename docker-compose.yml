@@ -1,0 +1,102 @@
+services:
+  firefly:
+    image: fireflyiii/core:latest
+    restart: unless-stopped
+    depends_on:
+      - firefly-db
+    env_file: .env.firefly
+    ports:
+      - "8080:8080"
+    volumes:
+      - firefly_upload:/var/www/html/storage/upload
+
+  firefly-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: firefly
+      POSTGRES_PASSWORD: firefly
+      POSTGRES_DB: firefly
+    volumes:
+      - firefly_db:/var/lib/postgresql/data
+
+  agent-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: copilot
+      POSTGRES_DB: copilot
+    ports:
+      - "5433:5432"
+    volumes:
+      - agent_db:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://copilot:copilot@agent-db:5432/copilot
+      REDIS_URL: redis://redis:6379/0
+      FIREFLY_BASE_URL: http://firefly:8080
+    ports:
+      - "8000:8000"
+    depends_on:
+      - agent-db
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker --loglevel INFO
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://copilot:copilot@agent-db:5432/copilot
+      REDIS_URL: redis://redis:6379/0
+      FIREFLY_BASE_URL: http://firefly:8080
+    depends_on:
+      - agent-db
+      - redis
+
+  beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app beat --loglevel INFO
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: python -m app.bot.runner
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://copilot:copilot@agent-db:5432/copilot
+      REDIS_URL: redis://redis:6379/0
+      FIREFLY_BASE_URL: http://firefly:8080
+    depends_on:
+      - agent-db
+      - redis
+
+volumes:
+  firefly_upload:
+  firefly_db:
+  agent_db:

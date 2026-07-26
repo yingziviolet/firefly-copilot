@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+.env
+.env.*
+.claude
+记账中枢-后端架构.md
