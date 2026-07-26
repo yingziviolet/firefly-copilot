@@ -1,5 +1,6 @@
 # ---- 本地规划文档(内部资料,不入库)----
 记账中枢-后端架构.md
+运行与面试演示.md
 
 # ---- Claude Code 本地配置 ----
 .claude/settings.local.json
