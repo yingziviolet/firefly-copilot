@@ -1,0 +1,37 @@
+# ---- 本地规划文档(内部资料,不入库)----
+记账中枢-后端架构.md
+
+# ---- Claude Code 本地配置 ----
+.claude/settings.local.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ---- 环境变量与密钥 ----
+.env
+.env.*
+!.env.example
+*.pem
+
+# ---- 测试与工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Docker ----
+docker-compose.override.yml
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
