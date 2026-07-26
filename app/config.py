@@ -28,13 +28,10 @@ class Settings(BaseSettings):
     default_currency: str = "CNY"
     default_asset_account: str = "现金钱包"
 
-    telegram_bot_token: str = ""
-    telegram_allowed_user_ids: str = ""
-    telegram_alert_chat_id: str = ""
-
-    @property
-    def allowed_user_ids(self) -> set[int]:
-        return {int(x) for x in self.telegram_allowed_user_ids.split(",") if x.strip()}
+    # 企业微信群机器人 webhook(告警通道)
+    wecom_webhook_url: str = ""
+    # Web 控制台访问令牌;本机使用可留空,公网部署必须设置
+    console_token: str = ""
 
 
 @lru_cache

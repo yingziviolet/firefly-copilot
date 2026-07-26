@@ -28,17 +28,16 @@ _PARSERS: dict[str, Callable[[bytes], ParseResult]] = {
 router = APIRouter(tags=["upload"])
 
 
-@router.post("/upload/csv", status_code=202)
-async def upload_csv(source: str, file: UploadFile) -> dict:
+def enqueue_csv(source: str, raw: bytes) -> tuple[str, int, int]:
+    """解析 CSV 并逐笔入队,JSON 端点与控制台表单共用。
+
+    返回 (trace_id, enqueued, skipped);source 非法抛 ValueError,解析失败抛 ParseError。
+    """
     parser = _PARSERS.get(source)
     if parser is None:
-        raise HTTPException(status_code=422, detail=f"unsupported source: {source}")
+        raise ValueError(f"unsupported source: {source}")
 
-    raw = await file.read()
-    try:
-        txns, skipped = parser(raw)
-    except ParseError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    txns, skipped = parser(raw)
 
     # 整批共用一个 trace_id,便于按批次全链路追踪
     trace_id = new_trace_id()
@@ -52,4 +51,16 @@ async def upload_csv(source: str, file: UploadFile) -> dict:
         enqueued=len(txns),
         skipped=skipped,
     )
-    return {"trace_id": trace_id, "enqueued": len(txns), "skipped": skipped}
+    return trace_id, len(txns), skipped
+
+
+@router.post("/upload/csv", status_code=202)
+async def upload_csv(source: str, file: UploadFile) -> dict:
+    raw = await file.read()
+    try:
+        trace_id, enqueued, skipped = enqueue_csv(source, raw)
+    except ParseError as exc:  # 注意:ParseError 是 ValueError 子类,必须先捕获
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"trace_id": trace_id, "enqueued": enqueued, "skipped": skipped}

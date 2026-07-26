@@ -12,9 +12,6 @@ os.environ["FIREFLY_BASE_URL"] = "http://firefly.test"
 os.environ["FIREFLY_PAT"] = "test-pat"
 os.environ["FIREFLY_WEBHOOK_SECRET"] = "test-secret"
 os.environ["ANTHROPIC_API_KEY"] = "test-key"
-os.environ["TELEGRAM_BOT_TOKEN"] = "123456:test-token"
-os.environ["TELEGRAM_ALERT_CHAT_ID"] = "10001"
-os.environ["TELEGRAM_ALLOWED_USER_IDS"] = "10001"
 
 import pytest  # noqa: E402
 

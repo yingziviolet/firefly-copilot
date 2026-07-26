@@ -14,8 +14,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import httpx
-
 from app.config import get_settings
 
 CheckResult = tuple[str, str]  # (status: ok/fail/skip, detail)
@@ -30,16 +28,10 @@ def _check_config_required() -> list[tuple[str, CheckResult]]:
             "Firefly 后台 Profile -> OAuth -> 创建 PAT 后填入 .env",
         ),
         ("配置 ANTHROPIC_API_KEY", s.anthropic_api_key, "LLM 分类需要;填入 .env"),
-        ("配置 TELEGRAM_BOT_TOKEN", s.telegram_bot_token, "@BotFather 创建 bot 后填入 .env"),
         (
-            "配置 TELEGRAM_ALLOWED_USER_IDS",
-            s.telegram_allowed_user_ids,
-            "@userinfobot 查你的数字 id 填入 .env",
-        ),
-        (
-            "配置 TELEGRAM_ALERT_CHAT_ID",
-            s.telegram_alert_chat_id,
-            "告警推送目标,一般填你自己的 user id",
+            "配置 WECOM_WEBHOOK_URL",
+            s.wecom_webhook_url,
+            "企业微信任意群 -> 群机器人 -> 添加,复制 webhook 地址填入 .env(告警通道)",
         ),
     ]
     results = []
@@ -115,18 +107,15 @@ def _check_firefly_pat() -> CheckResult:
     return "ok", f"PAT 有效(Firefly 现有 {len(categories)} 个分类)"
 
 
-def _check_telegram() -> CheckResult:
-    token = get_settings().telegram_bot_token
-    if not token:
-        return "skip", "token 未配置,跳过"
-    try:
-        resp = httpx.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
-    except httpx.HTTPError as exc:
-        return "fail", f"网络失败:{exc}"
-    if not resp.is_success:
-        return "fail", f"getMe 返回 {resp.status_code} —— token 可能不正确"
-    username = resp.json().get("result", {}).get("username", "?")
-    return "ok", f"bot @{username} 有效"
+def _check_wecom() -> CheckResult:
+    """企微 webhook 连通性:发送一条自检测试消息(仅在已配置时)。"""
+    from app.services.notifier import send_wecom_message
+
+    if not get_settings().wecom_webhook_url:
+        return "skip", "webhook 未配置,跳过"
+    if send_wecom_message("firefly-copilot 自检测试消息 ✅"):
+        return "ok", "测试消息已发送,去群里确认"
+    return "fail", "发送失败 —— 检查 webhook 地址是否完整正确"
 
 
 def _check_llm_live() -> CheckResult:
@@ -158,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Redis(任务队列)", _check_redis),
         ("Firefly III 连通性", _check_firefly_reachable),
         ("Firefly PAT 有效性", _check_firefly_pat),
-        ("Telegram Bot token", _check_telegram),
+        ("企业微信告警通道", _check_wecom),
     ]
 
     results: list[tuple[str, CheckResult]] = list(_check_config_required())

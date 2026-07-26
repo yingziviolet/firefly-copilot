@@ -112,25 +112,6 @@ services:
       redis:
         condition: service_healthy
 
-  bot:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    restart: unless-stopped
-    command: python -m app.bot.runner
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql+psycopg://copilot:copilot@agent-db:5432/copilot
-      REDIS_URL: redis://redis:6379/0
-      FIREFLY_BASE_URL: http://firefly:8080
-    depends_on:
-      agent-db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-
 volumes:
   firefly_upload:
   firefly_db:

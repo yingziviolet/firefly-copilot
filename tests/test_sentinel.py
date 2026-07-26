@@ -1,4 +1,4 @@
-"""哨兵重复扣费检测单测:假 Firefly 客户端 + 记录 Telegram 调用,不触真实网络。"""
+"""哨兵重复扣费检测单测:假 Firefly 客户端 + 记录通知调用,不触真实网络。"""
 
 from typing import Any
 
@@ -37,14 +37,14 @@ def _split(dest: str, amount: str, dt: str, journal: str) -> dict[str, Any]:
 
 @pytest.fixture()
 def sent(monkeypatch) -> list[dict[str, Any]]:
-    """替换 send_telegram_message,记录每次调用。"""
+    """替换 notify,记录每次调用。"""
     calls: list[dict[str, Any]] = []
 
-    def fake_send(text: str, chat_id: str | None = None, parse_mode: str | None = None) -> bool:
-        calls.append({"text": text, "chat_id": chat_id, "parse_mode": parse_mode})
+    def fake_notify(text: str, parse_mode: str | None = None) -> bool:
+        calls.append({"text": text, "parse_mode": parse_mode})
         return True
 
-    monkeypatch.setattr(tasks_sentinel, "send_telegram_message", fake_send)
+    monkeypatch.setattr(tasks_sentinel, "notify", fake_notify)
     return calls
 
 

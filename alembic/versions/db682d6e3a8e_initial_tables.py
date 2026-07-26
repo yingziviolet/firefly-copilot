@@ -95,7 +95,6 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("corrected_category", sa.String(length=100), nullable=True),
-        sa.Column("telegram_message_id", sa.String(length=64), nullable=True),
         sa.Column("trace_id", sa.String(length=32), nullable=False),
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=_NOW, nullable=False),

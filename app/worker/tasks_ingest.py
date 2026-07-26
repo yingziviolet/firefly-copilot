@@ -32,7 +32,7 @@ from app.schemas.transaction import CanonicalTransaction
 from app.services import classifier, dedup, review
 from app.services.fingerprint import compute_fingerprint
 from app.services.firefly_client import FireflyError, get_firefly_client
-from app.services.notifier import send_telegram_message
+from app.services.notifier import notify
 from app.services.rules import record_audit
 from app.worker.celery_app import celery_app
 
@@ -66,13 +66,13 @@ def _store_to_firefly(
 def _notify_pending_review(
     txn: CanonicalTransaction, suggestion: ClassificationResult, item_id: int
 ) -> None:
-    """Telegram 提醒待复核;通知失败只记日志,不影响管道结果。"""
+    """多通道提醒待复核;通知失败只记日志,不影响管道结果。"""
     text = (
         f"待复核记账:{txn.counterparty} {txn.amount} {txn.currency}\n"
         f"建议分类:{suggestion.category}(置信度 {suggestion.confidence:.2f})\n"
         f"复核项 ID:{item_id}"
     )
-    if not send_telegram_message(text):
+    if not notify(text):
         logger.warning("pending_review_notify_failed", item_id=item_id)
 
 

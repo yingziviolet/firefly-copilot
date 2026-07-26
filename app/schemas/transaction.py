@@ -1,4 +1,4 @@
-"""统一交易模型:所有渠道(CSV/Telegram/webhook)解析后都收敛到 CanonicalTransaction。"""
+"""统一交易模型:所有渠道(CSV/快捷记账/webhook)解析后都收敛到 CanonicalTransaction。"""
 
 import enum
 from datetime import datetime
@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class TxnSource(enum.StrEnum):
     ALIPAY = "alipay"
     WECHAT = "wechat"
-    TELEGRAM = "telegram"
     MANUAL = "manual"
     WEBHOOK = "webhook"
 

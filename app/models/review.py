@@ -1,4 +1,4 @@
-"""人工复核队列:低置信度交易在这里等待 Telegram 按钮裁决。"""
+"""人工复核队列:低置信度交易在这里等待 Web 控制台裁决。"""
 
 import enum
 from datetime import datetime
@@ -29,6 +29,5 @@ class ReviewItem(TimestampMixin, Base):
         Enum(ReviewStatus, native_enum=False, length=16), default=ReviewStatus.PENDING, index=True
     )
     corrected_category: Mapped[str | None] = mapped_column(String(100), default=None)
-    telegram_message_id: Mapped[str | None] = mapped_column(String(64), default=None)
     trace_id: Mapped[str] = mapped_column(String(32), index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

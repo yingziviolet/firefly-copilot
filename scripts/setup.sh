@@ -42,12 +42,13 @@ cat <<'EOF'
 === 下一步(一次性配置)===
   1. 打开 http://<服务器IP>:8080 注册 Firefly III 账号
      Profile -> OAuth -> Personal Access Token -> 创建 PAT
-  2. Telegram: 找 @BotFather /newbot 拿 bot token;找 @userinfobot 拿你的数字 user id
+  2. 企业微信告警:任意群 -> 群设置 -> 群机器人 -> 添加,复制 webhook 地址
   3. 编辑 .env 填入:
-       FIREFLY_PAT、ANTHROPIC_API_KEY、
-       TELEGRAM_BOT_TOKEN、TELEGRAM_ALLOWED_USER_IDS、TELEGRAM_ALERT_CHAT_ID
-  4. 应用新配置:docker compose up -d --force-recreate api worker beat bot
+       FIREFLY_PAT、ANTHROPIC_API_KEY、WECOM_WEBHOOK_URL
+       (公网部署再设 CONSOLE_TOKEN)
+  4. 应用新配置:docker compose up -d --force-recreate api worker beat
   5. 自检:      docker compose run --rm api python -m app.doctor
 
+Web 控制台:http://<服务器IP>:8000/review(快捷记账 / 上传 CSV / 复核)
 日常使用:docker compose up -d(启动) / docker compose down(停止)
 EOF

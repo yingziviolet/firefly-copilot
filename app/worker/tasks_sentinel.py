@@ -3,7 +3,7 @@
 scan_duplicate_charges(days=3):
 1. firefly.list_transactions(近 days 天, withdrawal)
 2. 按 (destination_name 归一化, amount) 分组,组内 >= 2 笔视为疑似重复扣费
-3. 对每组生成告警文本(商户/金额/日期列表),notifier.send_telegram_message 推送
+3. 对每组生成告警文本(商户/金额/日期列表),notifier.notify 推送
 4. 返回 {"groups": 命中组数, "checked": 扫描笔数}
 Firefly 不可达时记日志返回 {"error": ...},不抛异常(避免 beat 无限重试刷屏)。
 """
@@ -17,7 +17,7 @@ import httpx
 
 from app.logger import get_logger
 from app.services.firefly_client import FireflyError, get_firefly_client
-from app.services.notifier import send_telegram_message
+from app.services.notifier import notify
 from app.worker.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -74,7 +74,7 @@ def scan_duplicate_charges(days: int = 3) -> dict[str, Any]:
         if len(grouped) < 2:
             continue
         hit += 1
-        if not send_telegram_message(_build_alert_text(grouped)):
+        if not notify(_build_alert_text(grouped)):
             logger.warning("sentinel_alert_send_failed", merchant=merchant, amount=amount)
     logger.info("sentinel_scan_done", checked=len(splits), groups=hit)
     return {"groups": hit, "checked": len(splits)}

@@ -1,6 +1,6 @@
 # Firefly Copilot
 
-基于 [Firefly III](https://github.com/firefly-iii/firefly-iii) 的智能记账增强服务。它不修改 Firefly III 源码,而是以独立服务的方式通过 REST API + Webhook 集成:多渠道账单(支付宝 / 微信 CSV)接入后,先走本地规则库、再走 LLM 自动分类;高置信度的交易直接写入 Firefly III,低置信度的进入人工复核队列,由 Telegram 机器人按钮裁决;用户的每次改正会自动回流成规则,让系统越用越准。全链路按 trace_id 落审计日志,并内置"重复扣费哨兵"定时巡检。
+基于 [Firefly III](https://github.com/firefly-iii/firefly-iii) 的智能记账增强服务。它不修改 Firefly III 源码,而是以独立服务的方式通过 REST API + Webhook 集成:多渠道账单(支付宝 / 微信 CSV)接入后,先走本地规则库、再走 LLM 自动分类;高置信度的交易直接写入 Firefly III,低置信度的进入人工复核队列,在内置 Web 控制台按钮裁决;用户的每次改正会自动回流成规则,让系统越用越准。全链路按 trace_id 落审计日志,并内置"重复扣费哨兵"定时巡检,告警推送企业微信。
 
 ## 技术栈
 
@@ -8,7 +8,8 @@
 - Celery + Redis(异步任务、重试、定时巡检)
 - PostgreSQL + SQLAlchemy 2.0 + Alembic
 - Anthropic Messages API 协议的 LLM 分类(可通过 `ANTHROPIC_BASE_URL` 切换到自建网关)
-- aiogram Telegram Bot / structlog 结构化日志 / Docker Compose 部署
+- 内置 Web 复核控制台(零前端依赖)/ 企业微信群机器人告警(国内直连,免翻墙)
+- structlog 结构化日志 / Docker Compose 部署
 
 ## 架构
 
@@ -37,9 +38,11 @@ flowchart LR
     DB[(PostgreSQL<br/>rules / review_items /<br/>audit_logs / ingested_transactions)]
     FF[Firefly III API]
 
-    subgraph Bot["Telegram Bot (bot)"]
-        TG[复核按钮:通过 / 改分类 / 拒绝]
+    subgraph Review["人工复核"]
+        WEB[Web 控制台 /review<br/>批准 / 改分类 / 驳回]
     end
+
+    NOTIFY[告警:企业微信群机器人]
 
     CSV --> UP --> Q
     WH --> FW --> Q
@@ -48,11 +51,11 @@ flowchart LR
     ING -->|未命中| LLM
     ING -->|置信度达标| FF
     ING -->|置信度不足| DB
-    ING --> TG
-    TG -->|裁决| FIN --> FF
-    TG -->|改正回流| RULES
+    ING -->|待复核提醒| NOTIFY
+    WEB -->|裁决| FIN --> FF
+    WEB -->|改正回流| RULES
     SEN --> FF
-    SEN -->|告警| TG
+    SEN -->|告警| NOTIFY
     Worker <--> DB
 ```
 
@@ -62,9 +65,10 @@ flowchart LR
 - **指纹去重**:同一笔交易(CSV 重复导入、webhook 重放、任务重试)只入库一次
 - **两级自动分类**:本地规则库(商户 → 分类)命中即免 LLM;未命中走 LLM 分类,LLM 走 Anthropic Messages API 协议
 - **置信度门控**:置信度达阈值(默认 0.9)直接写入 Firefly III;不达标进入人工复核队列
-- **Telegram 人工复核闭环**:待复核交易推送到 Telegram,按钮裁决(通过 / 改分类 / 拒绝),裁决后异步写入 Firefly III
+- **Web 复核控制台**:`/review` 一页完成快捷记账、CSV 上传、待复核裁决(批准 / 改分类 / 驳回),手机浏览器可用,`CONSOLE_TOKEN` 鉴权
+- **人工复核闭环**:低置信度交易进入复核队列,Web 控制台按钮裁决,裁决后异步写入 Firefly III
 - **规则自学习**:人工改正的分类自动回流规则库,同商户后续免 LLM
-- **异常检测哨兵**:每日定时扫描近几天的支出,发现同商户同金额的疑似重复扣费即 Telegram 告警
+- **异常检测哨兵**:每日定时扫描近几天的支出,发现同商户同金额的疑似重复扣费即推送企业微信告警
 - **全链路审计**:一笔账从接入到入库的每一步都按 trace_id 落审计日志
 - **Firefly Webhook 接收**:HMAC 验签后落队列处理
 
@@ -89,9 +93,9 @@ flowchart LR
 之后只剩一次性的账号配置(密钥只能人来创建,脚本最后也会打印这份清单):
 
 1. 打开 `http://localhost:8080` 注册 Firefly III 账号;Profile → OAuth → 创建 Personal Access Token
-2. Telegram:找 @BotFather `/newbot` 拿 bot token;找 @userinfobot 拿自己的数字 user id
-3. 把 `FIREFLY_PAT`、`ANTHROPIC_API_KEY`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USER_IDS`、`TELEGRAM_ALERT_CHAT_ID` 填进 `.env`
-4. 应用配置:`docker compose up -d --force-recreate api worker beat bot`
+2. 告警通道(企业微信,国内直连):任意群 → 群设置 → 群机器人 → 添加,复制 webhook 地址
+3. 把 `FIREFLY_PAT`、`ANTHROPIC_API_KEY`、`WECOM_WEBHOOK_URL` 填进 `.env`(公网部署再设 `CONSOLE_TOKEN`)
+4. 应用配置:`docker compose up -d --force-recreate api worker beat`
 5. 自检:`docker compose run --rm api python -m app.doctor`——逐项告诉你哪里没配好、怎么配
 
 日常使用:`docker compose up -d` 启动全部,`docker compose down` 停止。
@@ -123,7 +127,8 @@ cp .env.example .env
 | `FIREFLY_WEBHOOK_SECRET` | Firefly webhook 验签密钥 |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | LLM 凭据;`ANTHROPIC_BASE_URL` 留空走官方,填自建网关地址即可切换 |
 | `CONFIDENCE_THRESHOLD` | 自动入账的置信度阈值,默认 `0.9` |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USER_IDS` / `TELEGRAM_ALERT_CHAT_ID` | Telegram 机器人配置 |
+| `WECOM_WEBHOOK_URL` | 企业微信群机器人 webhook(告警通道) |
+| `CONSOLE_TOKEN` | Web 控制台访问令牌,公网部署必设 |
 
 #### 3. 数据库迁移
 
@@ -138,7 +143,7 @@ alembic upgrade head
 Docker 方式(推荐):
 
 ```bash
-docker compose up -d api worker beat bot
+docker compose up -d api worker beat
 ```
 
 或本地逐个启动:
@@ -147,7 +152,6 @@ docker compose up -d api worker beat bot
 uvicorn app.main:app --reload --port 8000          # API
 celery -A app.worker.celery_app worker -l INFO     # Worker(Windows 加 --pool=solo)
 celery -A app.worker.celery_app beat -l INFO       # Beat(哨兵定时任务)
-python -m app.bot.runner                           # Telegram Bot(长轮询)
 ```
 
 #### 5. 试一笔
@@ -156,7 +160,7 @@ python -m app.bot.runner                           # Telegram Bot(长轮询)
 curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=alipay"
 ```
 
-返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易,低置信度的会出现在 Telegram 复核消息里。
+返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易。更省事的方式是直接打开 **`http://localhost:8000/review`**——快捷记账(输入「早餐 15」)、上传 CSV、复核裁决都在这一页;低置信度交易会推提醒到企业微信。
 
 ## 本地开发
 
@@ -179,11 +183,10 @@ ruff check .       # Lint
 
 ```
 app/
-├── api/                # FastAPI 路由:healthz / CSV 上传 / Firefly webhook
-├── bot/                # Telegram 机器人:复核按钮裁决(aiogram 长轮询)
+├── api/                # FastAPI 路由:healthz / CSV 上传 / Firefly webhook / Web 控制台
 ├── llm/                # LLM 客户端(Anthropic Messages API 协议)
 ├── models/             # SQLAlchemy 模型:rules / review_items / audit_logs / ingested_transactions
-├── parsers/            # 账单解析器:支付宝 / 微信 CSV
+├── parsers/            # 解析器:支付宝 / 微信 CSV、快捷记账文本
 ├── schemas/            # Pydantic 模型:标准交易、分类结果
 ├── services/           # 领域服务:指纹、去重、规则、分类、复核、Firefly 客户端、通知
 ├── worker/             # Celery:入库管道任务、哨兵定时任务
@@ -195,7 +198,7 @@ alembic/                # 数据库迁移
 docker/                 # Dockerfile
 scripts/                # 一键部署脚本(setup.ps1 / setup.sh)
 tests/                  # pytest(内存 SQLite + Celery eager + respx)
-docker-compose.yml      # Firefly III + PG x2 + Redis + api/worker/beat/bot
+docker-compose.yml      # Firefly III + PG x2 + Redis + api/worker/beat
 ```
 
 排障自检:`python -m app.doctor`(容器内:`docker compose run --rm api python -m app.doctor`),逐项检查配置与依赖服务连通性;加 `--llm` 可做一次真实 LLM 分类实测。
@@ -207,8 +210,8 @@ docker-compose.yml      # Firefly III + PG x2 + Redis + api/worker/beat/bot
 - [x] 支付宝 / 微信 CSV 接入与解析
 - [x] 交易指纹去重(幂等入库)
 - [x] 规则库 + LLM 两级分类,置信度门控
-- [x] Telegram 人工复核闭环,改正自动回流规则库
-- [x] 重复扣费哨兵(Celery beat 每日巡检 + Telegram 告警)
+- [x] 人工复核闭环(Web 控制台裁决),改正自动回流规则库
+- [x] 重复扣费哨兵(Celery beat 每日巡检 + 企业微信告警)
 - [x] 全链路 trace_id 审计日志
 - [x] Firefly webhook 验签接收(P1 仅落审计)
 - [x] Alembic 迁移、Docker Compose 部署、GitHub Actions CI

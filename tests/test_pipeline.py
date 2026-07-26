@@ -1,4 +1,4 @@
-"""入库管道端到端单测:Celery eager + 共享内存库,Firefly/LLM/Telegram 全部打假。"""
+"""入库管道端到端单测:Celery eager + 共享内存库,Firefly/LLM/通知 全部打假。"""
 
 from typing import Any
 
@@ -70,14 +70,14 @@ def fake_firefly(monkeypatch) -> FakeFirefly:
 
 
 @pytest.fixture()
-def telegram_calls(monkeypatch) -> list[str]:
+def notify_calls(monkeypatch) -> list[str]:
     calls: list[str] = []
 
-    def fake_send(text: str, chat_id: str | None = None, parse_mode: str | None = None) -> bool:
+    def fake_notify(text: str, parse_mode: str | None = None) -> bool:
         calls.append(text)
         return True
 
-    monkeypatch.setattr(tasks_ingest, "send_telegram_message", fake_send)
+    monkeypatch.setattr(tasks_ingest, "notify", fake_notify)
     return calls
 
 
@@ -156,7 +156,7 @@ def test_same_txn_twice_is_duplicate_and_firefly_called_once(
 
 
 def test_low_confidence_goes_to_pending_review(
-    db_session, celery_eager, fake_firefly, low_confidence_llm, telegram_calls
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls
 ):
     txn_data = _txn_data(counterparty="无名小店", source_ref="alipay-0002")
 
@@ -175,8 +175,8 @@ def test_low_confidence_goes_to_pending_review(
     assert record.status == IngestStatus.PENDING_REVIEW
     # 低置信度不得写 Firefly;需发出待复核提醒
     assert fake_firefly.calls == []
-    assert len(telegram_calls) == 1
-    assert "无名小店" in telegram_calls[0]
+    assert len(notify_calls) == 1
+    assert "无名小店" in notify_calls[0]
 
     events = list(db_session.scalars(select(AuditLog.event).order_by(AuditLog.id)))
     assert events == ["ingest.received", "ingest.classified", "ingest.pending_review"]
@@ -201,7 +201,7 @@ def test_firefly_failure_marks_failed_and_retries(
 
 
 def test_finalize_review_after_approve_imports(
-    db_session, celery_eager, fake_firefly, low_confidence_llm, telegram_calls
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls
 ):
     txn_data = _txn_data(counterparty="无名小店", source_ref="alipay-0003")
     pending = tasks_ingest.ingest_transaction.delay(txn_data, TRACE_ID).get()
@@ -230,7 +230,7 @@ def test_finalize_review_after_approve_imports(
 
 
 def test_finalize_review_corrected_uses_corrected_category(
-    db_session, celery_eager, fake_firefly, low_confidence_llm, telegram_calls
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls
 ):
     txn_data = _txn_data(counterparty="盒马鲜生", source_ref="alipay-0004")
     pending = tasks_ingest.ingest_transaction.delay(txn_data, TRACE_ID).get()
@@ -248,7 +248,7 @@ def test_finalize_review_corrected_uses_corrected_category(
 
 
 def test_finalize_review_rejected_skipped(
-    db_session, celery_eager, fake_firefly, low_confidence_llm, telegram_calls
+    db_session, celery_eager, fake_firefly, low_confidence_llm, notify_calls
 ):
     txn_data = _txn_data(counterparty="无名小店", source_ref="alipay-0005")
     pending = tasks_ingest.ingest_transaction.delay(txn_data, TRACE_ID).get()

@@ -1,4 +1,7 @@
-"""Telegram 推送(同步 httpx,供 worker/哨兵使用;Bot 交互在 app/bot)。"""
+"""通知推送(企业微信群机器人,同步 httpx,供 worker/哨兵使用)。
+
+notify() 是统一入口,后续新增通道(飞书/邮件等)在这里扩展。
+"""
 
 import httpx
 
@@ -7,44 +10,47 @@ from app.logger import get_logger
 
 logger = get_logger(__name__)
 
-_SEND_MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _TIMEOUT = 10.0
 
 
-def send_telegram_message(
-    text: str,
-    chat_id: str | None = None,
-    parse_mode: str | None = None,
-) -> bool:
-    """POST https://api.telegram.org/bot{token}/sendMessage。
+def send_wecom_message(text: str) -> bool:
+    """POST settings.wecom_webhook_url(企微群机器人)。
 
-    chat_id 缺省用 settings.telegram_alert_chat_id;
-    token/chat_id 未配置时记日志并返回 False(不抛异常,哨兵不因通知失败而重试)。
+    未配置/网络异常/非 2xx/响应 errcode!=0 均返回 False(成功时 HTTP 200 且 errcode=0)。
+    不抛异常:哨兵/管道不因通知失败而重试。
     """
     settings = get_settings()
-    token = settings.telegram_bot_token
-    target_chat = chat_id or settings.telegram_alert_chat_id
-    if not token or not target_chat:
-        logger.warning(
-            "telegram_not_configured", has_token=bool(token), has_chat_id=bool(target_chat)
-        )
+    url = settings.wecom_webhook_url
+    if not url:
+        logger.warning("wecom_not_configured")
         return False
 
-    payload: dict[str, str] = {"chat_id": target_chat, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-
+    payload = {"msgtype": "text", "text": {"content": text}}
     try:
-        resp = httpx.post(
-            _SEND_MESSAGE_URL.format(token=token), json=payload, timeout=_TIMEOUT
-        )
+        resp = httpx.post(url, json=payload, timeout=_TIMEOUT)
     except httpx.HTTPError as exc:
-        logger.warning("telegram_send_error", error=str(exc))
+        logger.warning("wecom_send_error", error=str(exc))
         return False
 
     if not resp.is_success:
         logger.warning(
-            "telegram_send_non_2xx", status_code=resp.status_code, body=resp.text[:200]
+            "wecom_send_non_2xx", status_code=resp.status_code, body=resp.text[:200]
         )
         return False
+
+    try:
+        errcode = resp.json().get("errcode")
+    except ValueError:
+        errcode = None
+    if errcode != 0:
+        logger.warning("wecom_send_errcode_nonzero", errcode=errcode, body=resp.text[:200])
+        return False
     return True
+
+
+def notify(text: str) -> bool:
+    """统一通知入口:当前走企业微信;未配置 warning 并返回 False。"""
+    if not get_settings().wecom_webhook_url:
+        logger.warning("notify_no_channel_configured")
+        return False
+    return send_wecom_message(text)
