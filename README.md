@@ -1,13 +1,48 @@
-# Firefly Copilot
+<h1 align="center">Firefly Copilot</h1>
 
-基于 [Firefly III](https://github.com/firefly-iii/firefly-iii) 的智能记账增强服务。它不修改 Firefly III 源码,而是以独立服务的方式通过 REST API + Webhook 集成:多渠道账单(支付宝 / 微信 CSV)接入后,先走本地规则库、再走 LLM 自动分类;高置信度的交易直接写入 Firefly III,低置信度的进入人工复核队列,在内置 Web 控制台按钮裁决;用户的每次改正会自动回流成规则,让系统越用越准。全链路按 trace_id 落审计日志,每周把收支、订阅涨价和疑似重复扣费汇总成一条企业微信简报。
+<p align="center">
+  <strong>把账单导入、AI 分类、人工复核、自然语言查账和每周简报串成一条可运行的个人财务自动化链路。</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/yingziviolet/firefly-copilot/actions/workflows/ci.yml">
+    <img alt="CI" src="https://github.com/yingziviolet/firefly-copilot/actions/workflows/ci.yml/badge.svg">
+  </a>
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Docker Compose" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/deploy-self--hosted-16a34a">
+</p>
+
+<p align="center">
+  <img src="docs/assets/review-console.png" width="760" alt="Firefly Copilot 记账复核台">
+</p>
+
+Firefly Copilot 是运行在 [Firefly III](https://github.com/firefly-iii/firefly-iii) 旁边的独立增强服务。Firefly III 继续负责账户、交易、预算和报表，本项目通过 REST API 与 Webhook 增加自动化能力，不修改也不 fork Firefly III 源码。
+
+> **当前状态:** P1/P2 功能已完成，Docker Compose 可复现部署，GitHub Actions 持续执行 201 项自动测试。
+
+## 在 Firefly III 之上增加了什么
+
+| 环节 | Firefly III / 原有基础 | Firefly Copilot 新增 |
+| --- | --- | --- |
+| 账单接入 | 提供账本与交易 API | 支付宝、微信 CSV/XLSX 解析，渠道自动识别 |
+| 重复控制 | 保存最终交易 | 指纹去重，重复上传和任务重试不重复入账 |
+| 自动分类 | 提供分类与交易字段 | 本地商户规则优先，未命中再调用 LLM |
+| 风险控制 | 人工管理交易 | 置信度门控：高置信度自动入账，低置信度进入复核队列 |
+| 人工纠错 | 可手动修改交易 | Web 复核台批准、改分类、驳回；纠错自动沉淀为商户规则 |
+| 主动提醒 | 用户主动打开报表 | 企业微信待复核提醒与每周财务简报 |
+| 财务洞察 | 图表、预算和报表 | 订阅识别、涨价检测、疑似重复扣费 |
+| 查账交互 | 页面筛选与报表 | DeepSeek 理解自然语言，本地生成受限参数并查询 Firefly |
+| 本地运行 | Docker 自托管 | Windows 控制面板、一键启动、自检与健康检查 |
+
+这不是聊天机器人直接访问数据库：自然语言查账时，LLM 只负责把问题转换成日期、收支方向、分类、商户和统计方式；程序完成校验后调用 Firefly API，金额计算留在本地，模型不能生成或执行 SQL。
 
 ## 技术栈
 
 - Python 3.12+ / FastAPI / Pydantic v2
 - Celery + Redis(异步任务、重试、定时巡检)
 - PostgreSQL + SQLAlchemy 2.0 + Alembic
-- Anthropic Messages API 协议的 LLM 分类(可通过 `ANTHROPIC_BASE_URL` 切换到自建网关)
+- Anthropic Messages API 协议的 LLM 分类与意图解析(`.env.example` 默认 DeepSeek V4 Flash,可切换兼容网关)
 - 内置 Web 复核控制台(零前端依赖)/ 企业微信群机器人告警(国内直连,免翻墙)
 - structlog 结构化日志 / Docker Compose 部署
 
@@ -30,11 +65,13 @@ flowchart LR
     subgraph Worker["Celery worker / beat"]
         ING[ingest_transaction<br/>指纹去重 → 分类 → 置信度门控]
         FIN[finalize_review]
+        EVT[handle_firefly_event<br/>异步审计]
         SEN[周报:收支 / 订阅 / 重复扣费<br/>每周一 09:00]
     end
 
     RULES[(规则库)]
     LLM[LLM 分类器]
+    QUERY[自然语言意图<br/>参数归一化与校验]
     DB[(PostgreSQL<br/>rules / review_items /<br/>audit_logs / ingested_transactions)]
     FF[Firefly III API]
 
@@ -45,7 +82,7 @@ flowchart LR
     NOTIFY[告警:企业微信群机器人]
 
     CSV --> UP --> Q
-    WH --> FW --> Q
+    WH --> FW --> EVT --> DB
     Q --> ING
     ING -->|先查| RULES
     ING -->|未命中| LLM
@@ -54,6 +91,8 @@ flowchart LR
     ING -->|待复核提醒| NOTIFY
     WEB -->|裁决| FIN --> FF
     WEB -->|改正回流| RULES
+    WEB -->|快捷记账 / 上传| Q
+    WEB -->|自然语言查账| QUERY --> FF
     SEN --> FF
     SEN -->|告警| NOTIFY
     Worker <--> DB
@@ -68,11 +107,20 @@ flowchart LR
 - **Web 复核控制台**:`/review` 一页完成快捷记账、自然语言查账、CSV 上传、待复核裁决(批准 / 改分类 / 驳回),手机浏览器可用,`CONSOLE_TOKEN` 鉴权
 - **人工复核闭环**:低置信度交易进入复核队列,Web 控制台按钮裁决,裁决后异步写入 Firefly III
 - **规则自学习**:人工改正的分类自动回流规则库,同商户后续免 LLM
-- **每周财务简报**:每周一 09:00 汇总上周收支、支出分类、订阅涨价与疑似重复扣费,整轮只推送一条企业微信消息
-- **订阅管家**:按商户与月度扣费周期识别持续订阅,比较最近两期金额并标记涨价
+- **每周财务简报**:每周一 09:00(`Asia/Shanghai`)汇总上周收支、支出分类、订阅涨价与疑似重复扣费,整轮只推送一条企业微信消息
+- **订阅管家**:同商户最近 3 笔扣费间隔均为 25–35 天且最近一次不超过 40 天时识别为持续订阅,并比较最近两期金额
 - **自然语言查账**:支持「上月餐饮花了多少」「今年打车多少笔」等聚合问题;LLM 只生成受限查询参数,不生成 SQL
 - **全链路审计**:一笔账从接入到入库的每一步都按 trace_id 落审计日志
-- **Firefly Webhook 接收**:HMAC 验签后落队列处理
+- **Firefly Webhook 接收**:HMAC 验签后异步记录审计事件,为后续事件联动保留入口
+
+## 为什么它是一个可落地项目
+
+- **可复现:** Docker Compose 同时拉起 Firefly III、PostgreSQL、Redis、API、worker 和 beat，数据库迁移随 API 启动自动执行
+- **可恢复:** 账本、规则和复核状态写入 Firefly/PostgreSQL Docker 卷，停止或重建应用容器不会清空数据
+- **可观测:** `/healthz`、结构化日志、trace_id 审计链路和 `app.doctor` 自检覆盖启动与运行排障
+- **可回退:** 队列任务幂等、交易指纹去重、低置信度转人工复核，避免模型结果直接污染账本
+- **可测试:** 201 项测试覆盖解析、分类、去重、Webhook、复核、周报和自然语言查账；CI 不依赖真实密钥
+- **可替换:** LLM 通过 Anthropic Messages API 协议接入，账本通过 Firefly REST API 接入，两者都与领域逻辑隔离
 
 ## 快速开始
 
@@ -99,6 +147,14 @@ flowchart LR
 3. 把 `FIREFLY_PAT`、`ANTHROPIC_API_KEY`、`WECOM_WEBHOOK_URL` 填进 `.env`(公网部署再设 `CONSOLE_TOKEN`)
 4. 应用配置:`docker compose up -d --force-recreate api worker beat`
 5. 自检:`docker compose run --rm api python -m app.doctor`——逐项告诉你哪里没配好、怎么配
+
+DeepSeek 配置示例:
+
+```env
+ANTHROPIC_API_KEY=sk-你的密钥
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+LLM_MODEL=deepseek-v4-flash
+```
 
 日常使用:`docker compose up -d` 启动全部,`docker compose down` 停止。
 
@@ -165,7 +221,8 @@ celery -A app.worker.celery_app beat -l INFO       # Beat(哨兵定时任务)
 #### 5. 试一笔
 
 ```bash
-curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=alipay"
+# 将路径替换为你自己的支付宝账单文件
+curl -F "file=@path/to/alipay_record.csv" "http://localhost:8000/api/upload/csv?source=alipay"
 ```
 
 返回 `202 {"trace_id": ..., "enqueued": n, "skipped": m}`,随后在 Firefly III 里看到自动分类入账的交易。更省事的方式是直接打开 **`http://localhost:8000/review`**——快捷记账(输入「早餐 15」)、自然语言查账、上传 CSV、复核裁决都在这一页;低置信度交易会推提醒到企业微信。
@@ -192,6 +249,15 @@ curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=a
 ```bash
 docker compose exec worker celery -A app.worker.celery_app call app.worker.tasks_sentinel.send_weekly_digest
 ```
+
+## 5 分钟演示路径
+
+1. 双击 `启动记账系统.cmd`，点击“启动并打开复核台”
+2. 上传一份支付宝或微信账单，再重复上传一次，展示指纹去重
+3. 输入「早餐 15」，展示自然文本记账与自动分类
+4. 对一笔待复核交易修改分类，再导入同商户交易，展示规则回流
+5. 输入「六月在美团花了多少」或「今年打车多少笔」，展示受限自然语言查账
+6. 打开 `http://localhost:8080` 查看 Firefly III 报表，或点击启动器中的“立即补发本周周报”
 
 ## 本地开发
 
@@ -255,6 +321,14 @@ Docker Desktop 的端口转发在 WSL 重启后偶尔会失联,重启对应容�
 ```bash
 docker compose restart firefly   # 8080 打不开重启 firefly;8000 打不开重启 api
 ```
+
+## 当前边界
+
+- 当前是单用户、自托管项目，不包含 SaaS 多租户与公网托管
+- 已内置支付宝、微信账单解析；其他渠道需要新增解析器
+- 自然语言查账限制为最长 366 天，只支持聚合查询，不允许模型生成 SQL
+- 每周定时任务依赖运行本项目的电脑或服务器保持在线
+- 项目不会读取邮箱或信用卡账户，也不提供投资建议
 
 ## Roadmap
 
