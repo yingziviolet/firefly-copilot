@@ -102,6 +102,12 @@ flowchart LR
 
 日常使用:`docker compose up -d` 启动全部,`docker compose down` 停止。
 
+### Windows 一键启动
+
+已经完成 `.env` 配置后，双击根目录的 `启动记账系统.cmd`，点击“启动并打开复核台”即可。控制面板还可打开 Firefly III、立即补发周报、查看容器状态和停止服务。
+
+> 每周一 09:00 的自动周报依赖本机和 Docker Desktop 保持运行；错过后可点击“立即补发本周周报”。
+
 ### 手动分步(可选,想了解每一步时看这里)
 
 #### 1. 起基础设施(Firefly III + PostgreSQL + Redis)
