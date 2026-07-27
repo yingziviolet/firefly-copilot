@@ -1,7 +1,7 @@
 <h1 align="center">Firefly Copilot</h1>
 
 <p align="center">
-  <strong>把账单导入、AI 分类、人工复核、自然语言查账和每周简报串成一条可运行的个人财务自动化链路。</strong>
+  <strong>面向后端 + AI Agent 开发的财务自动化项目：FastAPI 编排多步调查，LLM 动态调用只读工具，Firefly III 提供真实账本能力。</strong>
 </p>
 
 <p align="center">
@@ -17,9 +17,11 @@
   <img src="docs/assets/review-console.png" width="760" alt="Firefly Copilot 记账复核台">
 </p>
 
-Firefly Copilot 是运行在 [Firefly III](https://github.com/firefly-iii/firefly-iii) 旁边的独立增强服务。Firefly III 继续负责账户、交易、预算和报表，本项目通过 REST API 与 Webhook 增加自动化能力，不修改也不 fork Firefly III 源码。
+Firefly Copilot 是运行在 [Firefly III](https://github.com/firefly-iii/firefly-iii) 旁边的后端 + AI Agent 增强服务。项目重点不是套一层聊天页面，而是实现一套可运行、可约束、可审计的 Agent 工作流：LLM 根据问题和观察结果规划下一步，FastAPI 与 Pydantic 负责参数校验和工具路由，Firefly API 提供账本数据，SQLAlchemy 持久化完整调查轨迹。
 
-> **当前状态:** P1/P2 与多步财务调查 Agent 已完成，Docker Compose 可复现部署，GitHub Actions 持续执行 200+ 项自动测试。
+除多步财务调查 Agent 外，项目还覆盖账单导入、规则优先的 AI 分类、置信度门控、人工复核、自然语言查账、异常检测和每周简报。它不修改也不 fork Firefly III 源码，可以通过 Docker Compose 独立部署。
+
+> **当前状态:** P1/P2 与多步财务调查 Agent 已完成，Docker Compose 可复现部署，项目包含 220+ 项自动测试。
 
 ## 在 Firefly III 之上增加了什么
 
