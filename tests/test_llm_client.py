@@ -11,7 +11,7 @@ import pytest
 from app.config import get_settings
 from app.llm.client import LLMClient, LLMError, get_llm_client
 from app.schemas.classify import DEFAULT_CATEGORIES, LLMClassification
-from app.schemas.finance import FinanceQuery
+from app.schemas.finance import RawFinanceIntent
 from app.schemas.transaction import CanonicalTransaction, TxnDirection, TxnSource
 
 
@@ -130,25 +130,56 @@ def test_system_prompt_contains_all_categories() -> None:
     assert "只能从列表中选" in system
 
 
-def test_parse_finance_query_uses_restricted_schema() -> None:
-    expected = FinanceQuery(
-        start=date(2026, 6, 1),
-        end=date(2026, 6, 30),
+def test_parse_finance_query_uses_loose_intent_schema() -> None:
+    raw = RawFinanceIntent(
+        start="2026-06-01",
+        end="2026-06-30",
+        transaction_type="支出",
         category="餐饮",
-        metric="sum",
+        metric="金额",
     )
-    fake = _FakeAnthropic([expected])
+    fake = _FakeAnthropic([raw])
 
     result = LLMClient(client=fake).parse_finance_query(
-        "上月餐饮花了多少", today=date(2026, 7, 27)
+        "六月餐饮花了多少", today=date(2026, 7, 27)
     )
 
-    assert result is expected
+    assert result.start == date(2026, 6, 1)
+    assert result.end == date(2026, 6, 30)
+    assert result.transaction_type == "withdrawal"
+    assert result.metric == "sum"
     call = fake.messages.calls[0]
-    assert call["output_format"] is FinanceQuery
+    assert call["output_format"] is RawFinanceIntent
     assert "2026-07-27" in call["system"]
+    assert "餐饮" in call["system"]
     assert "不得生成 SQL" in call["system"]
-    assert call["messages"][0]["content"] == "上月餐饮花了多少"
+    assert call["messages"][0]["content"] == "六月餐饮花了多少"
+
+
+def test_parse_finance_query_retries_invalid_intent() -> None:
+    invalid = RawFinanceIntent(
+        start="九十天前",
+        end="今天",
+        transaction_type="支出",
+        category="交通",
+    )
+    corrected = RawFinanceIntent(
+        start="2026-04-28",
+        end="2026-07-27",
+        transaction_type="withdrawal",
+        category="交通",
+        metric="sum",
+    )
+    fake = _FakeAnthropic([invalid, corrected])
+
+    result = LLMClient(client=fake).parse_finance_query(
+        "过去90天交通花了多少", today=date(2026, 7, 27)
+    )
+
+    assert result.start == date(2026, 4, 28)
+    assert result.end == date(2026, 7, 27)
+    assert len(fake.messages.calls) == 2
+    assert "上次参数无效" in fake.messages.calls[1]["messages"][0]["content"]
 
 
 def test_get_llm_client_is_cached_singleton() -> None:

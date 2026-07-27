@@ -17,8 +17,8 @@ import anthropic
 
 from app.config import get_settings
 from app.logger import get_logger
-from app.schemas.classify import LLMClassification
-from app.schemas.finance import FinanceQuery
+from app.schemas.classify import DEFAULT_CATEGORIES, LLMClassification
+from app.schemas.finance import FinanceQuery, RawFinanceIntent
 from app.schemas.transaction import CanonicalTransaction, TxnDirection
 
 logger = get_logger("app.llm.client")
@@ -76,27 +76,38 @@ class LLMClient:
         return result
 
     def parse_finance_query(self, question: str, today: date) -> FinanceQuery:
+        categories = "、".join(DEFAULT_CATEGORIES)
         system = (
-            f"你是记账查询参数解析器。今天是 {today.isoformat()}。"
-            "把问题转换为给定结构化格式。只允许查询最长 366 天内的收入或支出，"
-            "可选分类、商户，并且只能计算金额合计(sum)或笔数(count)。"
+            f"你是记账查询意图解析器。今天是 {today.isoformat()}。"
+            f"可用分类：{categories}。"
+            "只提取时间、收入或支出、分类、商户、金额合计或笔数。"
+            "日期必须输出 YYYY-MM-DD；没有时间时使用本月至今。"
+            "这两个月表示上一个自然月1日至今天，最近两个月表示滚动两个月。"
+            "分类优先从可用分类中选择，具体店名或平台放入商户。"
             "不得生成 SQL、URL、代码或理财建议。"
         )
-        try:
-            response = self._client.messages.parse(
-                model=self._settings.llm_model,
-                max_tokens=self._settings.llm_max_tokens,
-                output_config={"effort": self._settings.llm_effort},
-                system=system,
-                messages=[{"role": "user", "content": question}],
-                output_format=FinanceQuery,
-            )
-        except Exception as exc:
-            raise LLMError(f"LLM 调用失败: {exc}") from exc
-        parsed = getattr(response, "parsed_output", None)
-        if parsed is None:
-            raise LLMError("LLM 未返回有效的查账参数")
-        return parsed
+        last_error: Exception | None = None
+        for attempt in range(2):
+            content = question
+            if last_error is not None:
+                content += f"\n上次参数无效：{last_error}\n请修正后重新提取。"
+            try:
+                response = self._client.messages.parse(
+                    model=self._settings.llm_model,
+                    max_tokens=self._settings.llm_max_tokens,
+                    output_config={"effort": self._settings.llm_effort},
+                    system=system,
+                    messages=[{"role": "user", "content": content}],
+                    output_format=RawFinanceIntent,
+                )
+                parsed = getattr(response, "parsed_output", None)
+                if parsed is None:
+                    raise ValueError("模型未返回查账意图")
+                return parsed.to_query(question, today)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("finance_query_intent_invalid", attempt=attempt + 1, error=str(exc))
+        raise LLMError(f"LLM 查账意图解析失败: {last_error}") from last_error
 
     def _parse_once(self, system: str, user_content: str) -> LLMClassification:
         """单次结构化分类调用;任何 SDK/校验异常统一包装为 LLMError。"""
