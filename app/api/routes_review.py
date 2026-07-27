@@ -260,20 +260,36 @@ def console_query(question: Annotated[str, Form()] = "") -> RedirectResponse:
         splits = get_firefly_client().list_transactions(
             query.start, query.end, txn_type=query.transaction_type
         )
-    except (LLMError, FireflyError, httpx.HTTPError) as exc:
-        logger.warning("console_finance_query_failed", error=str(exc))
-        return _redirect_with_msg("暂时没法查询，请换一种明确问法后重试")
+    except LLMError as exc:
+        logger.warning("console_finance_query_parse_failed", error=str(exc))
+        return _redirect_with_msg("没能识别查询条件，请尝试：六月餐饮支出多少")
+    except (FireflyError, httpx.HTTPError) as exc:
+        logger.warning("console_finance_query_backend_failed", error=str(exc))
+        return _redirect_with_msg("账目服务暂时不可用，请确认 Docker/Firefly 正在运行")
 
     result = aggregate_transactions(splits, query)
     direction = "收入" if query.transaction_type == "deposit" else "支出"
-    filters = " ".join(value for value in (query.category, query.merchant) if value)
-    subject = f"{direction} {filters}".strip()
+    filters: list[str] = []
+    if query.category:
+        filters.append(f"分类「{query.category}」")
+    if query.merchant:
+        filters.append(f"商户包含「{query.merchant}」")
     if query.metric == "count":
         summary = f"共 {result} 笔"
+        metric_label = "交易笔数"
     else:
         summary = f"合计 {format_money(result)} {get_settings().default_currency}"
+        metric_label = "金额合计"
+    understood = "，".join(
+        [
+            f"{query.start.isoformat()} 至 {query.end.isoformat()}",
+            direction,
+            *filters,
+            metric_label,
+        ]
+    )
     return _redirect_with_msg(
-        f"查询结果:{query.start.isoformat()} 至 {query.end.isoformat()}，{subject}，{summary}"
+        f"已理解:{understood}；查询结果:{summary}"
     )
 
 

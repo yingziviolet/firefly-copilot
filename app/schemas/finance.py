@@ -1,11 +1,9 @@
 import re
 from calendar import monthrange
-from datetime import date
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
-
 
 _DIRECTION_ALIASES = {
     "withdrawal": "withdrawal",

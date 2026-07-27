@@ -323,9 +323,12 @@ def test_finance_query_returns_deterministic_sum(client, monkeypatch):
 
     assert resp.status_code == 303
     message = unquote_plus(resp.headers["location"])
+    assert "已理解:" in message
     assert "2026-06-01 至 2026-06-30" in message
-    assert "餐饮" in message
-    assert "合计 20.00 CNY" in message
+    assert "支出" in message
+    assert "分类「餐饮」" in message
+    assert "金额合计" in message
+    assert "查询结果:合计 20.00 CNY" in message
 
 
 def test_finance_query_llm_error_is_shown(client, monkeypatch):
@@ -345,7 +348,7 @@ def test_finance_query_llm_error_is_shown(client, monkeypatch):
     )
 
     assert resp.status_code == 303
-    assert "暂时没法查询" in unquote_plus(resp.headers["location"])
+    assert "没能识别查询条件" in unquote_plus(resp.headers["location"])
 
 
 def test_finance_query_network_error_is_shown(client, monkeypatch):
@@ -369,7 +372,7 @@ def test_finance_query_network_error_is_shown(client, monkeypatch):
     )
 
     assert resp.status_code == 303
-    assert "暂时没法查询" in unquote_plus(resp.headers["location"])
+    assert "账目服务暂时不可用" in unquote_plus(resp.headers["location"])
 
 
 # ---------- CSV 上传表单 ----------
