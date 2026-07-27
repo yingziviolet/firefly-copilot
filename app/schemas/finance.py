@@ -71,6 +71,17 @@ def _query_period(
     if relative_days:
         days = int(relative_days.group(1) or relative_days.group(2))
         return today - timedelta(days=days), today
+    relative_months = re.search(
+        r"(?:最近|过去)(十二|十一|十|[一二三四五六七八九]|\d{1,2})个?月"
+        r"|(?:这)?(十二|十一|十|[一二三四五六七八九]|\d{1,2})个?月(?:内|以来)",
+        question,
+    )
+    if relative_months:
+        token = relative_months.group(1) or relative_months.group(2)
+        months = _CHINESE_MONTHS.get(token, int(token) if token.isdigit() else 0)
+        if not 1 <= months <= 12:
+            raise ValueError("查询月份范围必须在 1 到 12 之间")
+        return _shift_months(today, -months), today
     if "这两个月" in question:
         return previous_month_end.replace(day=1), today
     if "最近两个月" in question:

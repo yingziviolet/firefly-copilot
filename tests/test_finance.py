@@ -95,6 +95,15 @@ def test_raw_finance_intent_corrects_relative_day_period():
     assert query.end == date(2026, 7, 27)
 
 
+def test_raw_finance_intent_corrects_relative_month_period():
+    raw = RawFinanceIntent(start="三个月前", end="今天", category="交通")
+
+    query = raw.to_query("这三个月以来交通花了多少钱", date(2026, 7, 27))
+
+    assert query.start == date(2026, 4, 27)
+    assert query.end == date(2026, 7, 27)
+
+
 def test_raw_finance_intent_normalizes_common_category_word():
     query = RawFinanceIntent(metric="count").to_query(
         "今年打车多少笔", date(2026, 7, 27)
