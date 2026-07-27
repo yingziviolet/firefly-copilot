@@ -84,6 +84,8 @@ class LLMClient:
             "日期必须输出 YYYY-MM-DD；没有时间时使用本月至今。"
             "这两个月表示上一个自然月1日至今天，最近两个月表示滚动两个月。"
             "分类优先从可用分类中选择，具体店名或平台放入商户。"
+            "用户只说商户时 category 必须为 null，不要推断分类。"
+            "只返回 JSON 对象，不要输出解释、Markdown 或计算结果。"
             "不得生成 SQL、URL、代码或理财建议。"
         )
         last_error: Exception | None = None
@@ -95,6 +97,7 @@ class LLMClient:
                 response = self._client.messages.parse(
                     model=self._settings.llm_model,
                     max_tokens=self._settings.llm_max_tokens,
+                    temperature=0,
                     output_config={"effort": self._settings.llm_effort},
                     system=system,
                     messages=[{"role": "user", "content": content}],

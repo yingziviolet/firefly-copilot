@@ -153,6 +153,9 @@ def test_parse_finance_query_uses_loose_intent_schema() -> None:
     assert "2026-07-27" in call["system"]
     assert "餐饮" in call["system"]
     assert "不得生成 SQL" in call["system"]
+    assert "只返回 JSON" in call["system"]
+    assert "不要推断分类" in call["system"]
+    assert call["temperature"] == 0
     assert call["messages"][0]["content"] == "六月餐饮花了多少"
 
 
