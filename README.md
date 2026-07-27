@@ -19,7 +19,7 @@
 
 Firefly Copilot 是运行在 [Firefly III](https://github.com/firefly-iii/firefly-iii) 旁边的独立增强服务。Firefly III 继续负责账户、交易、预算和报表，本项目通过 REST API 与 Webhook 增加自动化能力，不修改也不 fork Firefly III 源码。
 
-> **当前状态:** P1/P2 功能已完成，Docker Compose 可复现部署，GitHub Actions 持续执行 201 项自动测试。
+> **当前状态:** P1/P2 与多步财务调查 Agent 已完成，Docker Compose 可复现部署，GitHub Actions 持续执行 200+ 项自动测试。
 
 ## 在 Firefly III 之上增加了什么
 
@@ -33,6 +33,7 @@ Firefly Copilot 是运行在 [Firefly III](https://github.com/firefly-iii/firefl
 | 主动提醒 | 用户主动打开报表 | 企业微信待复核提醒与每周财务简报 |
 | 财务洞察 | 图表、预算和报表 | 订阅识别、涨价检测、疑似重复扣费 |
 | 查账交互 | 页面筛选与报表 | DeepSeek 理解自然语言，本地生成受限参数并查询 Firefly |
+| 多步调查 | 单次筛选或报表 | LLM 按观察结果动态选择四个只读工具，最多三步后形成结论 |
 | 本地运行 | Docker 自托管 | Windows 控制面板、一键启动、自检与健康检查 |
 
 这不是聊天机器人直接访问数据库：自然语言查账时，LLM 只负责把问题转换成日期、收支方向、分类、商户和统计方式；程序完成校验后调用 Firefly API，金额计算留在本地，模型不能生成或执行 SQL。
@@ -58,6 +59,7 @@ flowchart LR
     subgraph API["FastAPI (api)"]
         UP[/POST /api/upload/csv/]
         FW[/POST /api/webhook/firefly/]
+        AQ[/POST /api/agent/query/]
     end
 
     Q[(Redis 队列)]
@@ -72,6 +74,7 @@ flowchart LR
     RULES[(规则库)]
     LLM[LLM 分类器]
     QUERY[自然语言意图<br/>参数归一化与校验]
+    AGENT[财务调查 Agent<br/>决策 → 工具 → observation<br/>最多 3 次]
     DB[(PostgreSQL<br/>rules / review_items /<br/>audit_logs / ingested_transactions)]
     FF[Firefly III API]
 
@@ -93,10 +96,50 @@ flowchart LR
     WEB -->|改正回流| RULES
     WEB -->|快捷记账 / 上传| Q
     WEB -->|自然语言查账| QUERY --> FF
+    AQ --> AGENT
+    AGENT -->|4 个只读工具| FF
+    AGENT -->|逐步审计| DB
     SEN --> FF
     SEN -->|告警| NOTIFY
     Worker <--> DB
 ```
+
+## 多步财务调查 Agent
+
+`POST /api/agent/query` 提供只读、多步财务调查。它不是把用户问题一次性交给模型，而是运行一个受控循环：
+
+1. LLM 根据问题和已有 `observation` 选择下一项工具及结构化参数；
+2. Pydantic 校验参数，后端调用 Firefly API，并用 `Decimal` 完成金额计算；
+3. 工具结果作为新 `observation` 回给 LLM，由模型决定继续调查还是结束；
+4. 最多允许三次工具尝试，到达上限后强制基于现有证据总结。
+
+模型只能动态选择以下四个只读工具：
+
+- `summarize_spending`：按分类或商户汇总支出；
+- `search_transactions`：按日期、分类和商户查询有限条交易；
+- `detect_subscriptions`：识别持续订阅和涨价；
+- `find_duplicate_charges`：识别相同商户、相同金额的疑似重复扣费。
+
+每次开始、工具调用、成功或失败、最终结束都会按同一个 `trace_id` 写审计日志。模型没有 SQL、写账或修改分类权限，错误工具名和无效参数也只会变成可纠正的 observation。
+
+```bash
+curl -X POST http://localhost:8000/api/agent/query \
+  -H "Content-Type: application/json" \
+  -H "X-Console-Token: $CONSOLE_TOKEN" \
+  -d '{"question":"调查这个月支出增加的原因，并检查是否有重复扣费"}'
+```
+
+### FastAPI、Agent、LangChain 和 RAG 的关系
+
+| 技术 | 在本项目里的职责 | 是否使用 |
+| --- | --- | --- |
+| FastAPI | 暴露 HTTP 接口、校验请求、鉴权、注入数据库会话和映射错误 | 使用 |
+| LLM | 理解调查目标，根据 observation 决定下一步并生成最终结论 | 使用 |
+| Agent | 编排“决策 → 工具 → observation → 再决策”，限制步数并审计 | 使用，自研小型 typed loop |
+| LangChain | 可提供 Agent/RAG 的通用组件，但不是 Agent 的必要条件 | 未使用；当前循环很小，直接 SDK 更清楚 |
+| RAG | 从向量库检索非结构化知识，再作为上下文交给模型 | 未使用；账目是结构化实时数据，应调用受限工具而不是向量检索 |
+
+面试时可以这样概括：**这是一个 FastAPI 承载的、基于 Anthropic structured output 的只读财务 Agent。LLM 负责规划和工具选择，Pydantic 与工具白名单负责边界，确定性 Python 代码负责查询和金额计算，SQLAlchemy 审计每一步；最多三次工具调用防止失控。** 与原来的“单次自然语言转查询参数”相比，关键升级是模型能根据上一步真实结果动态决定下一步。
 
 ## 功能列表
 
@@ -110,6 +153,7 @@ flowchart LR
 - **每周财务简报**:每周一 09:00(`Asia/Shanghai`)汇总上周收支、支出分类、订阅涨价与疑似重复扣费,整轮只推送一条企业微信消息
 - **订阅管家**:同商户最近 3 笔扣费间隔均为 25–35 天且最近一次不超过 40 天时识别为持续订阅,并比较最近两期金额
 - **自然语言查账**:支持「上月餐饮花了多少」「今年打车多少笔」等聚合问题;LLM 只生成受限查询参数,不生成 SQL
+- **多步财务调查 Agent**:四个只读工具按 observation 动态编排,最多三步,结构化决策、参数校验、强制收敛
 - **全链路审计**:一笔账从接入到入库的每一步都按 trace_id 落审计日志
 - **Firefly Webhook 接收**:HMAC 验签后异步记录审计事件,为后续事件联动保留入口
 
@@ -262,8 +306,9 @@ ruff check .       # Lint
 
 ```
 app/
-├── api/                # FastAPI 路由:healthz / CSV 上传 / Firefly webhook / Web 控制台
-├── llm/                # LLM 客户端(Anthropic Messages API 协议)
+├── agent/              # 多步调查循环与四个只读财务工具
+├── api/                # FastAPI 路由:healthz / Agent / CSV 上传 / webhook / Web 控制台
+├── llm/                # LLM 客户端:分类、意图解析、Agent 结构化决策
 ├── models/             # SQLAlchemy 模型:rules / review_items / audit_logs / ingested_transactions
 ├── parsers/            # 解析器:支付宝 / 微信 CSV、快捷记账文本
 ├── schemas/            # Pydantic 模型:标准交易、分类结果
@@ -308,7 +353,8 @@ docker compose restart firefly   # 8080 打不开重启 firefly;8000 打不开�
 
 - 当前是单用户、自托管项目，不包含 SaaS 多租户与公网托管
 - 已内置支付宝、微信账单解析；其他渠道需要新增解析器
-- 自然语言查账限制为最长 366 天，只支持聚合查询，不允许模型生成 SQL
+- 普通自然语言查账只支持受限聚合；Agent 工具查询最长 366 天且最多返回 20 条交易
+- Agent 最多调用三次只读工具，不包含 RAG、长期记忆、multi-agent，也不允许模型生成 SQL
 - 每周定时任务依赖运行本项目的电脑或服务器保持在线
 - 项目不会读取邮箱或信用卡账户，也不提供投资建议
 
@@ -330,6 +376,12 @@ docker compose restart firefly   # 8080 打不开重启 firefly;8000 打不开�
 - [x] 每周财务简报单次推送
 - [x] 订阅周期识别与涨价检测
 - [x] 受限自然语言查账
+
+### Agent(已实现)
+
+- [x] 四个只读财务调查工具
+- [x] 最多三步的结构化决策与 observation 循环
+- [x] FastAPI 接口、令牌鉴权和逐步 trace_id 审计
 
 ### 后续
 
