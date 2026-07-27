@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.routes_agent import page_router as agent_page_router
 from app.api.routes_agent import router as agent_router
 from app.api.routes_health import router as health_router
 from app.api.routes_review import (
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     app.include_router(upload_router, prefix="/api")
     app.include_router(webhook_router, prefix="/api")
     app.include_router(agent_router, prefix="/api")
+    app.include_router(agent_page_router)
     # Web 控制台(无 /api 前缀,浏览器直接访问)
     app.include_router(review_router)
     app.add_exception_handler(ConsoleAuthInterrupt, console_auth_interrupt_handler)

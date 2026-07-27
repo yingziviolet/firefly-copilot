@@ -395,3 +395,56 @@ def test_agent_endpoint_maps_agent_error_to_503(client, monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["detail"] == "AI Agent 服务暂时不可用"
+
+
+def test_agent_page_renders_visual_client(client):
+    response = client.get("/agent")
+
+    assert response.status_code == 200
+    assert "财务调查 Agent" in response.text
+    assert 'id="agent-form"' in response.text
+    assert 'id="messages"' in response.text
+    assert 'id="steps"' in response.text
+    assert "fetch('/api/agent/query'" in response.text
+    assert ".textContent" in response.text
+    assert ".innerHTML" not in response.text
+
+
+def test_agent_page_bootstraps_httponly_cookie(client, monkeypatch):
+    monkeypatch.setattr(
+        routes_agent,
+        "get_settings",
+        lambda: SimpleNamespace(console_token="secret"),
+    )
+
+    unauthorized = client.get("/agent")
+    assert unauthorized.status_code == 401
+
+    response = client.get("/agent?token=secret", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/agent"
+    assert "HttpOnly" in response.headers["set-cookie"]
+
+    page = client.get("/agent")
+    assert page.status_code == 200
+
+
+def test_agent_endpoint_accepts_console_cookie(client, monkeypatch):
+    expected = AgentResponse(
+        trace_id="trace-agent-cookie",
+        answer="未发现重复扣费。",
+        stopped_reason="finished",
+        steps=[],
+    )
+    monkeypatch.setattr(
+        routes_agent,
+        "get_settings",
+        lambda: SimpleNamespace(console_token="secret"),
+    )
+    monkeypatch.setattr(routes_agent, "run_agent", lambda question, session: expected)
+    client.cookies.set("console_token", "secret")
+
+    response = client.post("/api/agent/query", json={"question": "检查重复扣费"})
+
+    assert response.status_code == 200
+    assert response.json()["trace_id"] == "trace-agent-cookie"
