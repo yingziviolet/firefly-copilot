@@ -7,9 +7,16 @@ from sqlalchemy import select
 
 from app.agent import runner
 from app.agent.tools import TOOL_NAMES, AgentToolError, execute_tool
+from app.api import routes_agent
 from app.llm.client import LLMClient, LLMError
 from app.models.audit import AuditLog
-from app.schemas.agent import AgentDecision, AgentFinal, AgentQuery, AgentStep
+from app.schemas.agent import (
+    AgentDecision,
+    AgentFinal,
+    AgentQuery,
+    AgentResponse,
+    AgentStep,
+)
 
 
 class FakeMessages:
@@ -348,3 +355,43 @@ def test_runner_wraps_and_audits_llm_failure(db_session, monkeypatch):
 
     events = list(db_session.scalars(select(AuditLog.event).order_by(AuditLog.id)))
     assert events == ["agent.started", "agent.failed"]
+
+
+def test_agent_endpoint_returns_trace_and_steps(client, monkeypatch):
+    expected = AgentResponse(
+        trace_id="trace-agent-1",
+        answer="餐饮增长最多。",
+        stopped_reason="finished",
+        steps=[],
+    )
+    monkeypatch.setattr(routes_agent, "run_agent", lambda question, session: expected)
+
+    response = client.post("/api/agent/query", json={"question": "为什么增加？"})
+
+    assert response.status_code == 200
+    assert response.json()["trace_id"] == "trace-agent-1"
+
+
+def test_agent_endpoint_rejects_bad_token(client, monkeypatch):
+    monkeypatch.setattr(
+        routes_agent,
+        "get_settings",
+        lambda: SimpleNamespace(console_token="secret"),
+    )
+
+    response = client.post("/api/agent/query", json={"question": "查账"})
+
+    assert response.status_code == 401
+
+
+def test_agent_endpoint_maps_agent_error_to_503(client, monkeypatch):
+    monkeypatch.setattr(
+        routes_agent,
+        "run_agent",
+        lambda question, session: (_ for _ in ()).throw(runner.AgentError("boom")),
+    )
+
+    response = client.post("/api/agent/query", json={"question": "查账"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "AI Agent 服务暂时不可用"
