@@ -177,13 +177,15 @@ curl -F "file=@alipay_record.csv" "http://localhost:8000/api/upload/csv?source=a
 | 场景 | 操作 |
 | --- | --- |
 | 随手记一笔 | 打开 `http://localhost:8000/review`,输入「早餐 15」「昨天 打车 23.5」提交,自动分类入账 |
-| 自然语言查账 | 在 `/review` 输入「上月餐饮花了多少」「今年打车多少笔」;支持最长 366 天、收入/支出、分类/商户与合计/笔数 |
+| 自然语言查账 | 在 `/review` 输入「六月在美团花了多少」「这三个月以来交通花了多少钱」「今年打车多少笔」;支持最长 366 天、收入/支出、分类/商户与合计/笔数 |
 | 批量导账单 | 支付宝/微信 App 导出账单(CSV 或新版 XLSX 都行),在 `/review` 页选择渠道上传;重复导入同一文件不会记重 |
 | 处理待复核 | 低置信度交易出现在 `/review` 卡片列表(企业微信也会提醒),点 批准 / 改分类 / 驳回;**每改正一次,同商户下次自动分对** |
 | 看账本报表 | `http://localhost:8080`(Firefly III 自带仪表盘、分类统计、预算管理) |
 | 每周财务简报 | 无需操作,每周一 09:00 推送上一完整自然周;收支、订阅和重复扣费合并为一条消息 |
 | 启动 / 停止 | `docker compose up -d` / `docker compose down`(数据保存在 Docker 卷里,停了不丢) |
 | 排查问题 | `docker compose run --rm api python -m app.doctor` 逐项体检;`docker compose logs -f worker` 看处理日志 |
+
+查账结果会先显示程序理解出的日期、方向、分类或商户和统计方式，再显示 Firefly III 的实际查询结果。结果为 `0.00 CNY` 或 `0 笔` 表示条件已识别、但该范围内没有匹配账目。
 
 更新代码后执行 `docker compose up -d --build --force-recreate api worker beat`。想立即试看周报而不等到周一:
 
