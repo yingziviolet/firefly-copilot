@@ -133,7 +133,7 @@ cp .env.example .env
 | `REDIS_URL` | Celery broker/backend,默认 `redis://localhost:6379/0` |
 | `FIREFLY_BASE_URL` / `FIREFLY_PAT` | Firefly III 地址与 Personal Access Token |
 | `FIREFLY_WEBHOOK_SECRET` | Firefly webhook 验签密钥 |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | LLM 凭据;`ANTHROPIC_BASE_URL` 留空走官方,填自建网关地址即可切换 |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `LLM_MODEL` | LLM 凭据;DeepSeek 使用 `https://api.deepseek.com/anthropic` 和 `deepseek-v4-flash`,Anthropic 官方则将 base URL 留空 |
 | `CONFIDENCE_THRESHOLD` | 自动入账的置信度阈值,默认 `0.9` |
 | `WECOM_WEBHOOK_URL` | 企业微信群机器人 webhook(告警通道) |
 | `CONSOLE_TOKEN` | Web 控制台访问令牌,公网部署必设 |
