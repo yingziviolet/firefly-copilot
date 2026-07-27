@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 import anthropic
+from pydantic import ValidationError
 
 from app.config import get_settings
 from app.logger import get_logger
@@ -125,6 +126,9 @@ class LLMClient:
         self, question: str, today: date, steps: list[AgentStep]
     ) -> AgentDecision:
         system = (
+            '必须只返回一个 JSON 对象：{"action":"工具名或finish","arguments":{},'
+            '"reasoning_summary":"简短依据","final_answer":null}。'
+            "调用工具时 final_answer 必须是 null；finish 时必须填写 final_answer。"
             f"你是只读财务调查 Agent。今天是 {today.isoformat()}。\n"
             f"可用工具：\n{_AGENT_TOOLS}\n"
             "根据用户目标和已有 observation 选择一个工具，信息足够时 action=finish。"
@@ -144,6 +148,8 @@ class LLMClient:
         self, question: str, today: date, steps: list[AgentStep]
     ) -> AgentFinal:
         system = (
+            '必须只返回一个 JSON 对象：{"answer":"调查结论",'
+            '"evidence_summary":["关键证据"]}。'
             f"你是只读财务调查 Agent。今天是 {today.isoformat()}。"
             "工具调用次数已到上限，只能根据已有 observation 给出结论。"
             "不得补造数字；信息不足必须明确说明。"
@@ -168,6 +174,17 @@ class LLMClient:
                 messages=[{"role": "user", "content": content}],
                 output_format=output_format,
             )
+        except ValidationError as exc:
+            errors = exc.errors()
+            raw = errors[0].get("input") if errors else None
+            if isinstance(raw, str):
+                start, end = raw.find("{"), raw.rfind("}")
+                if 0 <= start < end:
+                    try:
+                        return output_format.model_validate_json(raw[start : end + 1])
+                    except ValidationError:
+                        pass
+            raise LLMError(f"LLM Agent 调用失败: {exc}") from exc
         except Exception as exc:
             raise LLMError(f"LLM Agent 调用失败: {exc}") from exc
         parsed = getattr(response, "parsed_output", None)

@@ -81,6 +81,8 @@ def test_llm_decides_from_question_and_observations():
     assert "summarize_spending" in call["system"]
     assert "2400.00" in call["messages"][0]["content"]
     assert "不得生成 SQL" in call["system"]
+    assert '{"action"' in call["system"]
+    assert '"arguments"' in call["system"]
 
 
 def test_llm_forced_finish_uses_agent_final_schema():
@@ -93,12 +95,32 @@ def test_llm_forced_finish_uses_agent_final_schema():
 
     assert result is expected
     assert fake.messages.calls[0]["output_format"] is AgentFinal
+    assert '{"answer"' in fake.messages.calls[0]["system"]
 
 
 def test_llm_agent_missing_output_is_wrapped():
     fake = FakeAnthropic([None])
     with pytest.raises(LLMError):
         LLMClient(client=fake).decide_agent_action("查账", date(2026, 7, 27), [])
+
+
+def test_llm_agent_accepts_prose_wrapped_json():
+    raw = (
+        "我需要先获取本月支出。\n"
+        '{"action":"summarize_spending","arguments":{"start":"2026-07-01",'
+        '"end":"2026-07-27","group_by":"category"},'
+        '"reasoning_summary":"先汇总本月支出"}'
+    )
+    with pytest.raises(ValidationError) as caught:
+        AgentDecision.model_validate_json(raw)
+    fake = FakeAnthropic([caught.value])
+
+    result = LLMClient(client=fake).decide_agent_action(
+        "比较本月和上月花费", date(2026, 7, 27), []
+    )
+
+    assert result.action == "summarize_spending"
+    assert result.arguments["start"] == "2026-07-01"
 
 
 class FakeFirefly:
@@ -161,6 +183,18 @@ def test_summarize_spending_uses_decimal_and_groups():
     assert result["total"] == "170.00"
     assert result["count"] == 3
     assert result["groups"][0] == {"name": "餐饮", "amount": "150.00", "count": 2}
+
+
+def test_summarize_spending_accepts_agent_date_arguments():
+    result = execute_tool(
+        "summarize_spending",
+        {"start_date": "2026-07-01", "end_date": "2026-07-31"},
+        firefly=FakeFirefly(SPLITS),
+        today=date(2026, 7, 27),
+    )
+
+    assert result["total"] == "170.00"
+    assert result["groups"][0]["name"] == "餐饮"
 
 
 def test_search_transactions_filters_and_limits():

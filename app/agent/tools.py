@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.services.finance import detect_subscriptions, find_duplicate_groups
 from app.services.firefly_client import FireflyClient, get_firefly_client
@@ -14,8 +14,8 @@ class AgentToolError(RuntimeError):
 
 
 class DateRangeInput(BaseModel):
-    start: date
-    end: date
+    start: date = Field(validation_alias=AliasChoices("start", "start_date"))
+    end: date = Field(validation_alias=AliasChoices("end", "end_date"))
 
     @model_validator(mode="after")
     def validate_range(self) -> "DateRangeInput":
@@ -28,7 +28,7 @@ class DateRangeInput(BaseModel):
 
 
 class SpendingSummaryInput(DateRangeInput):
-    group_by: Literal["category", "merchant"]
+    group_by: Literal["category", "merchant"] = "category"
 
 
 class TransactionSearchInput(DateRangeInput):
