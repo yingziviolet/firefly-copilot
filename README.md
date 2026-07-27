@@ -113,15 +113,6 @@ flowchart LR
 - **全链路审计**:一笔账从接入到入库的每一步都按 trace_id 落审计日志
 - **Firefly Webhook 接收**:HMAC 验签后异步记录审计事件,为后续事件联动保留入口
 
-## 为什么它是一个可落地项目
-
-- **可复现:** Docker Compose 同时拉起 Firefly III、PostgreSQL、Redis、API、worker 和 beat，数据库迁移随 API 启动自动执行
-- **可恢复:** 账本、规则和复核状态写入 Firefly/PostgreSQL Docker 卷，停止或重建应用容器不会清空数据
-- **可观测:** `/healthz`、结构化日志、trace_id 审计链路和 `app.doctor` 自检覆盖启动与运行排障
-- **可回退:** 队列任务幂等、交易指纹去重、低置信度转人工复核，避免模型结果直接污染账本
-- **可测试:** 201 项测试覆盖解析、分类、去重、Webhook、复核、周报和自然语言查账；CI 不依赖真实密钥
-- **可替换:** LLM 通过 Anthropic Messages API 协议接入，账本通过 Firefly REST API 接入，两者都与领域逻辑隔离
-
 ## 快速开始
 
 ### 一键启动(推荐)
@@ -249,15 +240,6 @@ curl -F "file=@path/to/alipay_record.csv" "http://localhost:8000/api/upload/csv?
 ```bash
 docker compose exec worker celery -A app.worker.celery_app call app.worker.tasks_sentinel.send_weekly_digest
 ```
-
-## 5 分钟演示路径
-
-1. 双击 `启动记账系统.cmd`，点击“启动并打开复核台”
-2. 上传一份支付宝或微信账单，再重复上传一次，展示指纹去重
-3. 输入「早餐 15」，展示自然文本记账与自动分类
-4. 对一笔待复核交易修改分类，再导入同商户交易，展示规则回流
-5. 输入「六月在美团花了多少」或「今年打车多少笔」，展示受限自然语言查账
-6. 打开 `http://localhost:8080` 查看 Firefly III 报表，或点击启动器中的“立即补发本周周报”
 
 ## 本地开发
 
