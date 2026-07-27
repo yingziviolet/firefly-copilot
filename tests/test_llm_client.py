@@ -176,7 +176,7 @@ def test_parse_finance_query_retries_invalid_intent() -> None:
     fake = _FakeAnthropic([invalid, corrected])
 
     result = LLMClient(client=fake).parse_finance_query(
-        "过去90天交通花了多少", today=date(2026, 7, 27)
+        "过去一段时间交通花了多少", today=date(2026, 7, 27)
     )
 
     assert result.start == date(2026, 4, 28)

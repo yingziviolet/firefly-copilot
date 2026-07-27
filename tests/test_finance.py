@@ -81,6 +81,20 @@ def test_raw_finance_intent_corrects_calendar_period_and_count():
     assert query.metric == "count"
 
 
+def test_raw_finance_intent_corrects_relative_day_period():
+    raw = RawFinanceIntent(
+        start="15天前",
+        end="今天",
+        transaction_type="支出",
+        category="交通",
+    )
+
+    query = raw.to_query("15天内交通花了多少钱", date(2026, 7, 27))
+
+    assert query.start == date(2026, 7, 12)
+    assert query.end == date(2026, 7, 27)
+
+
 def test_format_money_always_uses_two_decimal_places():
     assert format_money(Decimal("150.000000000000")) == "150.00"
     assert format_money(Decimal("335.050000000000")) == "335.05"

@@ -63,6 +63,12 @@ def _query_period(
     month_start = today.replace(day=1)
     previous_month_end = month_start - timedelta(days=1)
 
+    relative_days = re.search(
+        r"(?:最近|近|过去)(\d{1,3})天|(\d{1,3})天(?:内|以来)", question
+    )
+    if relative_days:
+        days = int(relative_days.group(1) or relative_days.group(2))
+        return today - timedelta(days=days), today
     if "这两个月" in question:
         return previous_month_end.replace(day=1), today
     if "最近两个月" in question:
