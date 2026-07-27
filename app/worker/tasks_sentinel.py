@@ -16,25 +16,12 @@ from typing import Any
 import httpx
 
 from app.logger import get_logger
-from app.services.finance import detect_subscriptions, format_money
+from app.services.finance import detect_subscriptions, find_duplicate_groups, format_money
 from app.services.firefly_client import FireflyError, get_firefly_client
 from app.services.notifier import notify
 from app.worker.celery_app import celery_app
 
 logger = get_logger(__name__)
-
-
-def _normalize_merchant(name: Any) -> str:
-    """商户名归一化:去首尾空白 + 小写。"""
-    return str(name or "").strip().lower()
-
-
-def _normalize_amount(amount: Any) -> str:
-    """金额归一化:Decimal 消除 "25.0"/"25.00" 差异;解析失败退回原始字符串。"""
-    try:
-        return str(Decimal(str(amount)).normalize())
-    except (InvalidOperation, ValueError):
-        return str(amount)
 
 
 def _build_alert_text(splits: list[dict[str, Any]]) -> str:
@@ -57,15 +44,6 @@ def _split_date(split: dict[str, Any]) -> date | None:
         return datetime.fromisoformat(str(split.get("date")).replace("Z", "+00:00")).date()
     except ValueError:
         return None
-
-
-def _duplicate_groups(splits: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for split in splits:
-        merchant = _normalize_merchant(split.get("destination_name"))
-        if merchant:
-            groups[(merchant, _normalize_amount(split.get("amount")))].append(split)
-    return [grouped for grouped in groups.values() if len(grouped) >= 2]
 
 
 def _sum_amounts(splits: list[dict[str, Any]]) -> Decimal:
@@ -151,7 +129,7 @@ def scan_duplicate_charges(days: int = 3) -> dict[str, Any]:
         logger.warning("sentinel_firefly_unreachable", error=str(exc))
         return {"error": str(exc)}
 
-    groups = _duplicate_groups(splits)
+    groups = find_duplicate_groups(splits)
     if groups and not notify("\n\n".join(_build_alert_text(grouped) for grouped in groups)):
         logger.warning("sentinel_alert_send_failed", groups=len(groups))
     hit = len(groups)
@@ -179,7 +157,7 @@ def send_weekly_digest(today_iso: str | None = None) -> dict[str, Any]:
         if (occurred := _split_date(split)) is not None and start <= occurred <= end
     ]
     subscriptions = detect_subscriptions(history, as_of=end)
-    duplicates = _duplicate_groups(withdrawals)
+    duplicates = find_duplicate_groups(withdrawals)
     text = _build_weekly_text(
         start, end, withdrawals, deposits, subscriptions, duplicates
     )

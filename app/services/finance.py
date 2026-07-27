@@ -82,3 +82,13 @@ def detect_subscriptions(
             }
         )
     return sorted(subscriptions, key=lambda item: item["merchant"].casefold())
+
+
+def find_duplicate_groups(splits: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for split in splits:
+        merchant = _merchant(split).casefold()
+        amount = _amount(split.get("amount"))
+        if merchant and amount is not None:
+            groups[(merchant, str(amount.normalize()))].append(split)
+    return [group for group in groups.values() if len(group) >= 2]
