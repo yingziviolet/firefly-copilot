@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.finance import FinanceQuery
+from app.schemas.finance import FinanceQuery, RawFinanceIntent
 from app.services.finance import aggregate_transactions, detect_subscriptions, format_money
 
 
@@ -43,6 +43,42 @@ def test_finance_query_accepts_common_llm_field_aliases():
     assert query.start == date(2026, 6, 1)
     assert query.end == date(2026, 6, 30)
     assert query.transaction_type == "withdrawal"
+
+
+def test_raw_finance_intent_normalizes_chinese_values():
+    raw = RawFinanceIntent(
+        start="2026-06-12",
+        end="2026-07-27",
+        transaction_type="支出",
+        category="交通消费",
+        metric="金额",
+    )
+
+    query = raw.to_query("1个半月内交通花了多少钱", date(2026, 7, 27))
+
+    assert query == FinanceQuery(
+        start=date(2026, 6, 12),
+        end=date(2026, 7, 27),
+        transaction_type="withdrawal",
+        category="交通",
+        metric="sum",
+    )
+
+
+def test_raw_finance_intent_corrects_calendar_period_and_count():
+    raw = RawFinanceIntent(
+        transaction_type="消费",
+        category="餐饮支出",
+        metric="笔数",
+    )
+
+    query = raw.to_query("这两个月餐饮有多少笔", date(2026, 7, 27))
+
+    assert query.start == date(2026, 6, 1)
+    assert query.end == date(2026, 7, 27)
+    assert query.transaction_type == "withdrawal"
+    assert query.category == "餐饮"
+    assert query.metric == "count"
 
 
 def test_format_money_always_uses_two_decimal_places():
