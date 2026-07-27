@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
+from app.schemas.classify import DEFAULT_CATEGORIES
+
 _DIRECTION_ALIASES = {
     "withdrawal": "withdrawal",
     "expense": "withdrawal",
@@ -115,7 +117,17 @@ def _normalize_metric(value: str | None, question: str) -> str:
     return "count" if re.search(r"几笔|多少笔|笔数|次数", question) else "sum"
 
 
-def _normalize_category(value: str | None) -> str | None:
+def _normalize_category(value: str | None, question: str) -> str | None:
+    for category in DEFAULT_CATEGORIES:
+        if category in question:
+            return category
+    for words, category in (
+        (("打车", "公交", "地铁", "网约车", "出租车"), "交通"),
+        (("外卖", "早餐", "午餐", "晚餐", "吃饭"), "餐饮"),
+    ):
+        if any(word in question for word in words):
+            return category
+
     category = (value or "").strip()
     for suffix in ("支出", "消费", "花费", "费用"):
         if category.endswith(suffix):
@@ -172,7 +184,7 @@ class RawFinanceIntent(BaseModel):
             start=start,
             end=end,
             transaction_type=_normalize_direction(self.transaction_type, question),
-            category=_normalize_category(self.category),
+            category=_normalize_category(self.category, question),
             merchant=(self.merchant or "").strip() or None,
             metric=_normalize_metric(self.metric, question),
         )

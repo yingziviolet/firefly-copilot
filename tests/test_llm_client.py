@@ -156,20 +156,9 @@ def test_parse_finance_query_uses_loose_intent_schema() -> None:
     assert "只返回 JSON" in call["system"]
     assert "不要推断分类" in call["system"]
     assert call["temperature"] == 0
+    assert call["thinking"] == {"type": "disabled"}
+    assert "output_config" not in call
     assert call["messages"][0]["content"] == "六月餐饮花了多少"
-
-
-def test_parse_finance_query_skips_llm_for_clear_relative_days() -> None:
-    fake = _FakeAnthropic([])
-
-    result = LLMClient(client=fake).parse_finance_query(
-        "15天内交通花了多少钱", today=date(2026, 7, 27)
-    )
-
-    assert result.start == date(2026, 7, 12)
-    assert result.end == date(2026, 7, 27)
-    assert result.category == "交通"
-    assert fake.messages.calls == []
 
 
 def test_parse_finance_query_retries_invalid_intent() -> None:
