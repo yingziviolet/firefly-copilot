@@ -9,6 +9,7 @@
 - LLM 返回的 category 不在候选列表内时,视为校验失败重试一次,仍失败抛 LLMError
 """
 
+import json
 from datetime import date
 from functools import lru_cache
 from typing import Any
@@ -17,6 +18,7 @@ import anthropic
 
 from app.config import get_settings
 from app.logger import get_logger
+from app.schemas.agent import AgentDecision, AgentFinal, AgentStep
 from app.schemas.classify import DEFAULT_CATEGORIES, LLMClassification
 from app.schemas.finance import FinanceQuery, RawFinanceIntent
 from app.schemas.transaction import CanonicalTransaction, TxnDirection
@@ -29,6 +31,13 @@ _DIRECTION_LABELS = {
     TxnDirection.INCOME: "收入",
     TxnDirection.TRANSFER: "转账",
 }
+
+_AGENT_TOOLS = """
+- summarize_spending: 按分类或商户汇总指定日期范围的支出
+- search_transactions: 按日期、分类、商户查询有限条交易
+- detect_subscriptions: 检查持续订阅和涨价
+- find_duplicate_charges: 检查近期相同商户、相同金额的疑似重复扣费
+"""
 
 
 class LLMError(RuntimeError):
@@ -111,6 +120,60 @@ class LLMClient:
                 last_error = exc
                 logger.warning("finance_query_intent_invalid", attempt=attempt + 1, error=str(exc))
         raise LLMError(f"LLM 查账意图解析失败: {last_error}") from last_error
+
+    def decide_agent_action(
+        self, question: str, today: date, steps: list[AgentStep]
+    ) -> AgentDecision:
+        system = (
+            f"你是只读财务调查 Agent。今天是 {today.isoformat()}。\n"
+            f"可用工具：\n{_AGENT_TOOLS}\n"
+            "根据用户目标和已有 observation 选择一个工具，信息足够时 action=finish。"
+            "只能使用 observation 中的事实，不得自行计算金额，不得生成 SQL、URL、代码或投资建议。"
+            "不要重复调用参数完全相同的工具。reasoning_summary 只写简短决策依据。"
+        )
+        content = json.dumps(
+            {
+                "question": question,
+                "steps": [step.model_dump(mode="json") for step in steps],
+            },
+            ensure_ascii=False,
+        )
+        return self._parse_agent(system, content, AgentDecision)
+
+    def finish_agent_answer(
+        self, question: str, today: date, steps: list[AgentStep]
+    ) -> AgentFinal:
+        system = (
+            f"你是只读财务调查 Agent。今天是 {today.isoformat()}。"
+            "工具调用次数已到上限，只能根据已有 observation 给出结论。"
+            "不得补造数字；信息不足必须明确说明。"
+        )
+        content = json.dumps(
+            {
+                "question": question,
+                "steps": [step.model_dump(mode="json") for step in steps],
+            },
+            ensure_ascii=False,
+        )
+        return self._parse_agent(system, content, AgentFinal)
+
+    def _parse_agent(self, system: str, content: str, output_format: Any) -> Any:
+        try:
+            response = self._client.messages.parse(
+                model=self._settings.llm_model,
+                max_tokens=self._settings.llm_max_tokens,
+                temperature=0,
+                thinking={"type": "disabled"},
+                system=system,
+                messages=[{"role": "user", "content": content}],
+                output_format=output_format,
+            )
+        except Exception as exc:
+            raise LLMError(f"LLM Agent 调用失败: {exc}") from exc
+        parsed = getattr(response, "parsed_output", None)
+        if parsed is None:
+            raise LLMError("LLM Agent 未返回结构化输出")
+        return parsed
 
     def _parse_once(self, system: str, user_content: str) -> LLMClassification:
         """单次结构化分类调用;任何 SDK/校验异常统一包装为 LLMError。"""
