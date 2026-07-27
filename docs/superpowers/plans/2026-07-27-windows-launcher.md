@@ -8,6 +8,8 @@
 
 **Tech Stack:** Windows PowerShell 5.1, .NET WinForms, Docker Compose, existing FastAPI/Celery services.
 
+**Execution note:** Real Windows PowerShell 5.1 testing showed that the planned WinForms completion timer did not fire reliably. The final implementation keeps the GUI responsive by letting the hidden `StartAndOpen` child process perform the health check and open the browser itself; failures use a message box, and “查看运行状态” refreshes Compose output on demand.
+
 ---
 
 ### Task 1: Testable launcher helpers

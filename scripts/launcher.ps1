@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("Gui", "StartServices", "WeeklyDigest", "SelfTest")]
+    [ValidateSet("Gui", "StartServices", "StartAndOpen", "WeeklyDigest", "WeeklyFromGui", "SelfTest")]
     [string]$Action = "Gui"
 )
 
@@ -30,8 +30,25 @@ function Get-ReviewUrl {
 }
 
 function Test-DockerEngine {
-    & docker version *> $null
+    & cmd.exe /d /c "docker version >nul 2>&1"
     return $LASTEXITCODE -eq 0
+}
+
+function Test-DockerImage {
+    & cmd.exe /d /c "docker image inspect firefly-copilot-api >nul 2>&1"
+    return $LASTEXITCODE -eq 0
+}
+
+function Invoke-ComposeCapture {
+    param([ValidateSet("ps", "stop")][string]$Command)
+
+    Set-Location $ProjectRoot
+    $lines = & cmd.exe /d /c "docker compose $Command 2>&1"
+    $exitCode = $LASTEXITCODE
+    return [PSCustomObject]@{
+        Text = ($lines | Out-String).TrimEnd()
+        ExitCode = $exitCode
+    }
 }
 
 function Wait-Until {
@@ -73,8 +90,7 @@ function Start-ProjectServices {
         Wait-Until -Condition { Test-DockerEngine } -TimeoutSeconds 120 -FailureMessage "Docker Desktop 启动超时。"
     }
 
-    & docker image inspect firefly-copilot-api *> $null
-    $needsSetup = $LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $ProjectRoot ".env.firefly"))
+    $needsSetup = -not (Test-DockerImage) -or -not (Test-Path -LiteralPath (Join-Path $ProjectRoot ".env.firefly"))
     if ($needsSetup) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "setup.ps1")
         if ($LASTEXITCODE -ne 0) { throw "首次构建失败，请查看上方信息。" }
@@ -97,6 +113,20 @@ function Send-WeeklyDigest {
     if ($LASTEXITCODE -ne 0) { throw "周报发送失败，请查看 worker 日志。" }
 }
 
+function Get-GuiChildAction {
+    param([ValidateSet("start", "weekly")][string]$Button)
+
+    if ($Button -eq "start") { return "StartAndOpen" }
+    return "WeeklyFromGui"
+}
+
+function Show-LauncherMessage {
+    param([string]$Text, [string]$Title = "记账系统")
+
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][Windows.Forms.MessageBox]::Show($Text, $Title)
+}
+
 function New-LauncherForm {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -108,7 +138,6 @@ function New-LauncherForm {
     $form.Size = New-Object Drawing.Size(620, 450)
     $form.MinimumSize = New-Object Drawing.Size(620, 450)
     $form.Font = New-Object Drawing.Font("Microsoft YaHei UI", 10)
-    $form.Tag = New-Object Collections.ArrayList
 
     $title = New-Object Windows.Forms.Label
     $title.Text = "记账系统"
@@ -144,48 +173,18 @@ function New-LauncherForm {
     }.GetNewClosure()
 
     $runAction = {
-        param([string]$ChildAction, [string]$BusyText, [scriptblock]$OnSuccess)
+        param([string]$ChildAction, [string]$BusyText)
 
         $status.Text = "状态：$BusyText"
         $output.Clear()
-        $id = [Guid]::NewGuid().ToString("N")
-        $stdout = Join-Path ([IO.Path]::GetTempPath()) "firefly-copilot-$id.out.log"
-        $stderr = Join-Path ([IO.Path]::GetTempPath()) "firefly-copilot-$id.err.log"
         $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Action $ChildAction"
         try {
-            $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
-                -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+            Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden
         }
         catch {
             $status.Text = "状态：启动失败"
             $output.Text = $_.Exception.Message
-            return
         }
-
-        $timer = New-Object Windows.Forms.Timer
-        $timer.Interval = 1000
-        [void]$form.Tag.Add($timer)
-        $handler = {
-            if (-not $process.HasExited) { return }
-            $timer.Stop()
-            $text = @(
-                if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
-                if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }
-            ) -join [Environment]::NewLine
-            $output.Text = $text.Trim()
-            if ($process.ExitCode -eq 0) {
-                $status.Text = "状态：完成"
-                & $OnSuccess
-            }
-            else {
-                $status.Text = "状态：失败，请查看下方信息"
-            }
-            Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
-            [void]$form.Tag.Remove($timer)
-            $timer.Dispose()
-        }.GetNewClosure()
-        $timer.Add_Tick($handler)
-        $timer.Start()
     }.GetNewClosure()
 
     $startButton = & $addButton "startButton" "启动并打开复核台" 28 112 270
@@ -196,35 +195,30 @@ function New-LauncherForm {
     $stopButton = & $addButton "stopButton" "停止服务" 28 228 170
 
     $startButton.Add_Click({
-        $success = {
-            Start-Process (Get-ReviewUrl)
-            $status.Text = "状态：服务正常；定时推送依赖电脑和 Docker 保持运行"
-        }.GetNewClosure()
-        & $runAction "StartServices" "正在启动 Docker 和服务…" $success
+        & $runAction (Get-GuiChildAction -Button "start") "后台启动中，完成后自动打开复核台"
     }.GetNewClosure())
     $reviewButton.Add_Click({ Start-Process (Get-ReviewUrl) }.GetNewClosure())
     $fireflyButton.Add_Click({ Start-Process "http://127.0.0.1:8080" })
     $weeklyButton.Add_Click({
-        $success = { $status.Text = "状态：本周周报已发送" }.GetNewClosure()
-        & $runAction "WeeklyDigest" "正在发送本周周报…" $success
+        & $runAction (Get-GuiChildAction -Button "weekly") "正在发送，完成后会弹出结果"
     }.GetNewClosure())
     $statusButton.Add_Click({
         if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
             $status.Text = "状态：未安装 Docker Desktop"
             return
         }
-        Set-Location $ProjectRoot
-        $output.Text = (& docker compose ps 2>&1 | Out-String)
-        $status.Text = if ($LASTEXITCODE -eq 0) { "状态：已刷新" } else { "状态：Docker 未运行" }
+        $result = Invoke-ComposeCapture -Command "ps"
+        $output.Text = $result.Text
+        $status.Text = if ($result.ExitCode -eq 0) { "状态：已刷新" } else { "状态：Docker 未运行" }
     }.GetNewClosure())
     $stopButton.Add_Click({
         if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
             $status.Text = "状态：未安装 Docker Desktop"
             return
         }
-        Set-Location $ProjectRoot
-        $output.Text = (& docker compose stop 2>&1 | Out-String)
-        $status.Text = if ($LASTEXITCODE -eq 0) { "状态：服务已停止，数据已保留" } else { "状态：停止失败" }
+        $result = Invoke-ComposeCapture -Command "stop"
+        $output.Text = $result.Text
+        $status.Text = if ($result.ExitCode -eq 0) { "状态：服务已停止，数据已保留" } else { "状态：停止失败" }
     }.GetNewClosure())
 
     return $form
@@ -244,6 +238,21 @@ if ($Action -eq "SelfTest") {
         $actual = Get-ReviewUrl -EnvPath $fixture
         if ($actual -ne "http://127.0.0.1:8000/review") {
             throw "Empty-token URL test failed: got '$actual'"
+        }
+        try {
+            $null = Test-DockerEngine
+        }
+        catch {
+            throw "Docker availability checks must not throw: $($_.Exception.Message)"
+        }
+        if ((Get-GuiChildAction -Button "start") -ne "StartAndOpen") {
+            throw "Start button must use StartAndOpen"
+        }
+        try {
+            $null = Invoke-ComposeCapture -Command "ps"
+        }
+        catch {
+            throw "Compose capture must not throw on native stderr: $($_.Exception.Message)"
         }
         $form = New-LauncherForm
         try {
@@ -269,8 +278,32 @@ if ($Action -eq "StartServices") {
     exit 0
 }
 
+if ($Action -eq "StartAndOpen") {
+    try {
+        Start-ProjectServices
+        Start-Process (Get-ReviewUrl)
+    }
+    catch {
+        Show-LauncherMessage -Text $_.Exception.Message -Title "启动失败"
+        exit 1
+    }
+    exit 0
+}
+
 if ($Action -eq "WeeklyDigest") {
     Send-WeeklyDigest
+    exit 0
+}
+
+if ($Action -eq "WeeklyFromGui") {
+    try {
+        Send-WeeklyDigest
+        Show-LauncherMessage -Text "本周周报已发送。"
+    }
+    catch {
+        Show-LauncherMessage -Text $_.Exception.Message -Title "周报发送失败"
+        exit 1
+    }
     exit 0
 }
 
