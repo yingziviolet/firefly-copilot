@@ -9,6 +9,7 @@
 - LLM 返回的 category 不在候选列表内时,视为校验失败重试一次,仍失败抛 LLMError
 """
 
+import re
 from datetime import date
 from functools import lru_cache
 from typing import Any
@@ -76,6 +77,16 @@ class LLMClient:
         return result
 
     def parse_finance_query(self, question: str, today: date) -> FinanceQuery:
+        category_pattern = "|".join(map(re.escape, DEFAULT_CATEGORIES))
+        # ponytail: clear day-range/category queries stay local; ambiguous wording still uses LLM.
+        quick = re.match(
+            rf"(?:最近|近|过去)?\d{{1,3}}天(?:内|以来)?(?:的)?"
+            rf"(?P<category>{category_pattern})(?:花了|支出|消费|收入|有|多少|几笔)",
+            question.strip(),
+        )
+        if quick:
+            return RawFinanceIntent(category=quick.group("category")).to_query(question, today)
+
         categories = "、".join(DEFAULT_CATEGORIES)
         system = (
             f"你是记账查询意图解析器。今天是 {today.isoformat()}。"
