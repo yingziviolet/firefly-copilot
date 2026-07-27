@@ -21,12 +21,16 @@ function Get-DotEnvValue {
     return ""
 }
 
-function Get-ReviewUrl {
-    param([string]$EnvPath = (Join-Path $ProjectRoot ".env"))
+function Get-ConsoleUrl {
+    param(
+        [string]$Path = "/review",
+        [string]$EnvPath = (Join-Path $ProjectRoot ".env")
+    )
 
     $token = Get-DotEnvValue -Path $EnvPath -Name "CONSOLE_TOKEN"
-    if (-not $token) { return "http://127.0.0.1:8000/review" }
-    return "http://127.0.0.1:8000/review?token=$([Uri]::EscapeDataString($token))"
+    $url = "http://127.0.0.1:8000$Path"
+    if (-not $token) { return $url }
+    return "${url}?token=$([Uri]::EscapeDataString($token))"
 }
 
 function Test-DockerEngine {
@@ -187,7 +191,7 @@ function New-LauncherForm {
         }
     }.GetNewClosure()
 
-    $startButton = & $addButton "startButton" "启动并打开复核台" 28 112 270
+    $startButton = & $addButton "startButton" "启动并打开财务 Agent" 28 112 270
     $reviewButton = & $addButton "reviewButton" "打开复核台" 306 112 270
     $fireflyButton = & $addButton "fireflyButton" "打开 Firefly III" 28 170 170
     $weeklyButton = & $addButton "weeklyButton" "立即补发本周周报" 210 170 190
@@ -195,9 +199,9 @@ function New-LauncherForm {
     $stopButton = & $addButton "stopButton" "停止服务" 28 228 170
 
     $startButton.Add_Click({
-        & $runAction (Get-GuiChildAction -Button "start") "后台启动中，完成后自动打开复核台"
+        & $runAction (Get-GuiChildAction -Button "start") "后台启动中，完成后自动打开财务 Agent"
     }.GetNewClosure())
-    $reviewButton.Add_Click({ Start-Process (Get-ReviewUrl) }.GetNewClosure())
+    $reviewButton.Add_Click({ Start-Process (Get-ConsoleUrl -Path "/review") }.GetNewClosure())
     $fireflyButton.Add_Click({ Start-Process "http://127.0.0.1:8080" })
     $weeklyButton.Add_Click({
         & $runAction (Get-GuiChildAction -Button "weekly") "正在发送，完成后会弹出结果"
@@ -228,14 +232,19 @@ if ($Action -eq "SelfTest") {
     $fixture = Join-Path ([IO.Path]::GetTempPath()) "firefly-launcher-selftest.env"
     try {
         "CONSOLE_TOKEN=abc 123&x" | Set-Content -LiteralPath $fixture -Encoding UTF8
-        $actual = Get-ReviewUrl -EnvPath $fixture
+        $actual = Get-ConsoleUrl -Path "/review" -EnvPath $fixture
         $expected = "http://127.0.0.1:8000/review?token=abc%20123%26x"
         if ($actual -ne $expected) {
             throw "URL test failed: expected '$expected', got '$actual'"
         }
+        $actual = Get-ConsoleUrl -Path "/agent" -EnvPath $fixture
+        $expected = "http://127.0.0.1:8000/agent?token=abc%20123%26x"
+        if ($actual -ne $expected) {
+            throw "Agent URL test failed: expected '$expected', got '$actual'"
+        }
         Wait-Until -Condition { $true } -TimeoutSeconds 1 -FailureMessage "unexpected timeout"
         "APP_ENV=dev" | Set-Content -LiteralPath $fixture -Encoding UTF8
-        $actual = Get-ReviewUrl -EnvPath $fixture
+        $actual = Get-ConsoleUrl -Path "/review" -EnvPath $fixture
         if ($actual -ne "http://127.0.0.1:8000/review") {
             throw "Empty-token URL test failed: got '$actual'"
         }
@@ -261,6 +270,10 @@ if ($Action -eq "SelfTest") {
                     throw "Missing control: $name"
                 }
             }
+            $start = $form.Controls.Find("startButton", $true)
+            if ($start[0].Text -ne "启动并打开财务 Agent") {
+                throw "Missing Agent launcher button"
+            }
         }
         finally {
             $form.Dispose()
@@ -281,7 +294,7 @@ if ($Action -eq "StartServices") {
 if ($Action -eq "StartAndOpen") {
     try {
         Start-ProjectServices
-        Start-Process (Get-ReviewUrl)
+        Start-Process (Get-ConsoleUrl -Path "/agent")
     }
     catch {
         Show-LauncherMessage -Text $_.Exception.Message -Title "启动失败"
