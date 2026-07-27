@@ -3,9 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 
+from app.agent import runner
 from app.agent.tools import TOOL_NAMES, AgentToolError, execute_tool
 from app.llm.client import LLMClient, LLMError
+from app.models.audit import AuditLog
 from app.schemas.agent import AgentDecision, AgentFinal, AgentQuery, AgentStep
 
 
@@ -220,3 +223,128 @@ def test_tool_rejects_invalid_range_and_unknown_name():
         )
     with pytest.raises(AgentToolError):
         execute_tool("store_transaction", {}, firefly=FakeFirefly([]))
+
+
+class FakeAgentLLM:
+    def __init__(self, decisions, final=None):
+        self.decisions = list(decisions)
+        self.final = final
+        self.decision_calls = []
+        self.finish_calls = []
+
+    def decide_agent_action(self, question, today, steps):
+        self.decision_calls.append((question, today, list(steps)))
+        decision = self.decisions.pop(0)
+        if isinstance(decision, Exception):
+            raise decision
+        return decision
+
+    def finish_agent_answer(self, question, today, steps):
+        self.finish_calls.append((question, today, list(steps)))
+        return self.final
+
+
+def test_runner_executes_observation_loop_and_finishes(db_session, monkeypatch):
+    llm = FakeAgentLLM(
+        [
+            AgentDecision(
+                action="summarize_spending",
+                arguments={
+                    "start": "2026-07-01",
+                    "end": "2026-07-27",
+                    "group_by": "category",
+                },
+                reasoning_summary="先看本月",
+            ),
+            AgentDecision(
+                action="search_transactions",
+                arguments={
+                    "start": "2026-07-01",
+                    "end": "2026-07-27",
+                    "category": "餐饮",
+                },
+                reasoning_summary="餐饮增长最大",
+            ),
+            AgentDecision(
+                action="finish",
+                reasoning_summary="证据足够",
+                final_answer="主要增长来自餐饮。",
+            ),
+        ]
+    )
+    calls = []
+    monkeypatch.setattr(runner, "get_llm_client", lambda: llm)
+    monkeypatch.setattr(
+        runner,
+        "execute_tool",
+        lambda name, arguments, today=None: calls.append((name, arguments))
+        or {"count": 1, "total": "700.00"},
+    )
+
+    result = runner.run_agent(
+        "为什么本月增加？", db_session, today=date(2026, 7, 27)
+    )
+
+    assert result.answer == "主要增长来自餐饮。"
+    assert result.stopped_reason == "finished"
+    assert [call[0] for call in calls] == ["summarize_spending", "search_transactions"]
+    assert llm.decision_calls[1][2][0].observation["total"] == "700.00"
+    events = list(db_session.scalars(select(AuditLog.event).order_by(AuditLog.id)))
+    assert events == [
+        "agent.started",
+        "agent.tool_called",
+        "agent.tool_succeeded",
+        "agent.tool_called",
+        "agent.tool_succeeded",
+        "agent.finished",
+    ]
+
+
+def test_runner_forces_finish_after_three_tool_attempts(db_session, monkeypatch):
+    llm = FakeAgentLLM(
+        [
+            AgentDecision(action="bad_tool", reasoning_summary="错误工具"),
+            AgentDecision(
+                action="search_transactions",
+                arguments={"start": "bad"},
+                reasoning_summary="参数错误",
+            ),
+            AgentDecision(
+                action="detect_subscriptions",
+                arguments={"as_of": "2026-07-27"},
+                reasoning_summary="检查订阅",
+            ),
+        ],
+        AgentFinal(answer="仅能确认存在一个订阅。", evidence_summary=["订阅 1 个"]),
+    )
+    monkeypatch.setattr(runner, "get_llm_client", lambda: llm)
+
+    def fake_execute(name, arguments, today=None):
+        if name == "bad_tool":
+            raise AgentToolError("未注册")
+        if name == "search_transactions":
+            AgentQuery(question="").model_dump()
+        return {"count": 1}
+
+    monkeypatch.setattr(runner, "execute_tool", fake_execute)
+
+    result = runner.run_agent("调查支出", db_session, today=date(2026, 7, 27))
+
+    assert result.stopped_reason == "limit"
+    assert [step.status for step in result.steps] == [
+        "tool_error",
+        "validation_error",
+        "success",
+    ]
+    assert llm.finish_calls
+
+
+def test_runner_wraps_and_audits_llm_failure(db_session, monkeypatch):
+    llm = FakeAgentLLM([LLMError("网络失败")])
+    monkeypatch.setattr(runner, "get_llm_client", lambda: llm)
+
+    with pytest.raises(runner.AgentError, match="AI Agent 服务暂时不可用"):
+        runner.run_agent("调查支出", db_session, today=date(2026, 7, 27))
+
+    events = list(db_session.scalars(select(AuditLog.event).order_by(AuditLog.id)))
+    assert events == ["agent.started", "agent.failed"]
